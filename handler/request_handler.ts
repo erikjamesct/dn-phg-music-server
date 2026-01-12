@@ -1,4 +1,4 @@
-import { ScriptEngine } from "../engine/script_engine.ts";
+import { ScriptEngine, MusicUrlData, LyricData } from "../engine/script_engine.ts";
 import { ScriptStorage } from "../storage/storage.ts";
 
 interface RequestData {
@@ -89,19 +89,65 @@ export class RequestHandler {
   }
 
   private async handleMusicUrl(source: string, info: any): Promise<any> {
+    const defaultSourceId = this.storage.getDefaultSource();
+    let targetSource: string | null = source || defaultSourceId || null;
+    let sourceType = source;
+    
+    if (!targetSource) {
+      throw new Error(`No available script for source: ${source}`);
+    }
+
+    // 如果传入的是音源类型（kg, wy, mg 等），需要找到支持该音源类型的脚本
+    if (!(targetSource as string).startsWith('user_api_')) {
+      const allScripts = this.storage.getLoadedScripts();
+      const targetScript = allScripts.find(script => 
+        script.supportedSources.includes(targetSource as string)
+      );
+      
+      if (!targetScript) {
+        throw new Error(`No available script for source: ${source}`);
+      }
+      
+      targetSource = targetScript.id;
+      console.log(`🎯 找到支持音源 ${source} 的脚本: ${targetScript.name} (${targetScript.id})`);
+    } else {
+      // 如果传入的是脚本 ID，需要找到该脚本支持的音源类型
+      const allScripts = this.storage.getLoadedScripts();
+      const targetScript = allScripts.find(script => 
+        script.id === targetSource
+      );
+      
+      if (!targetScript) {
+        throw new Error(`No available script for source: ${source}`);
+      }
+      
+      sourceType = targetScript.supportedSources[0];
+      console.log(`🎯 找到脚本 ${targetScript.name} (${targetScript.id})，支持的音源: ${sourceType}`);
+    }
+    
     const response = await this.engine.getMusicUrl({
-      source,
+      source: sourceType,
       action: 'musicUrl',
       info,
     });
-
-    if (!response) {
-      throw new Error('Failed to get music URL');
+    
+    console.log(`🎯 调用 getMusicUrl: sourceType=${sourceType}, source=${source}`);
+    
+    if (!response || !response.data) {
+      console.error(`❌ 获取音乐URL失败: source=${sourceType}, songmid=${info?.musicInfo?.songmid || 'unknown'}`);
+      throw new Error(`Failed to get music URL: source=${sourceType}`);
     }
 
+    const responseData = response.data as MusicUrlData;
+    
+    if (!responseData.url) {
+      console.error(`❌ 音乐URL为空: source=${sourceType}, songmid=${info?.musicInfo?.songmid || 'unknown'}`);
+      throw new Error(`Music URL is empty: source=${sourceType}`);
+    }
+    
     return {
       type: info.type,
-      url: response.data.url,
+      url: responseData.url,
     };
   }
 
@@ -116,7 +162,14 @@ export class RequestHandler {
       throw new Error('Failed to get lyric');
     }
 
-    return response.data;
+    const responseData = response.data as LyricData;
+    
+    return {
+      lyric: responseData.lyric,
+      tlyric: responseData.tlyric,
+      rlyric: responseData.rlyric,
+      lxlyric: responseData.lxlyric,
+    };
   }
 
   private async handlePic(source: string, info: any): Promise<string> {

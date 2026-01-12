@@ -11,9 +11,18 @@ const storage = new ScriptStorage();
 const engine = new ScriptEngine();
 const handler = new RequestHandler(engine, storage);
 
+await storage.ready();
+
+const scripts = await storage.getAllScripts();
+for (const script of scripts) {
+    await engine.loadScript(script);
+}
+console.log(`✅ 已加载 ${scripts.length} 个脚本`);
+
 new APIRoutes(app, handler, storage, engine);
 
 const port = Deno.env.get("PORT") || 8080;
+
 console.log(`🌐 服务器运行在 http://localhost:${port}`);
 
 await app.listen({ port: Number(port) });

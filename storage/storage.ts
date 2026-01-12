@@ -21,6 +21,7 @@ interface StorageData {
 }
 
 const STORAGE_KEY = "dn_music_scripts";
+const STORAGE_FILE = "./data/scripts.json";
 
 const DEFAULT_SCRIPT_INFO: Partial<ScriptInfo> = {
   name: "",
@@ -33,14 +34,29 @@ const DEFAULT_SCRIPT_INFO: Partial<ScriptInfo> = {
 export class ScriptStorage {
   private scripts: Map<string, ScriptStorageItem> = new Map();
   private defaultSourceId: string | null = null;
+  private readyPromise: Promise<void>;
 
   constructor() {
-    this.loadFromStorage();
+    this.readyPromise = this.loadFromStorage().catch(error => {
+      console.error("❌ 异步加载脚本存储失败:", error);
+    });
   }
 
-  private loadFromStorage(): void {
+  async ready(): Promise<void> {
+    await this.readyPromise;
+  }
+
+  private async loadFromStorage(): Promise<void> {
     try {
-      const storedData = Deno.env.get(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY);
+      let storedData: string | null = null;
+      
+      try {
+        storedData = await Deno.readTextFile(STORAGE_FILE);
+      } catch (error) {
+        console.log(`📁 存储文件不存在，尝试从环境变量加载`);
+        storedData = Deno.env.get(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY);
+      }
+      
       if (storedData) {
         const data: StorageData = JSON.parse(storedData);
         
@@ -65,7 +81,7 @@ export class ScriptStorage {
     }
   }
 
-  private saveToStorage(): void {
+  private async saveToStorage(): Promise<void> {
     try {
       const items = Array.from(this.scripts.values());
       const data: StorageData = {
@@ -73,8 +89,8 @@ export class ScriptStorage {
         defaultSourceId: this.defaultSourceId,
       };
       
-      const jsonData = JSON.stringify(data);
-      localStorage.setItem(STORAGE_KEY, jsonData);
+      const jsonData = JSON.stringify(data, null, 2);
+      await Deno.writeTextFile(STORAGE_FILE, jsonData);
       console.log(`💾 脚本已保存，共 ${items.length} 个`);
     } catch (error) {
       console.error("❌ 保存脚本存储失败:", error);
@@ -126,6 +142,7 @@ export class ScriptStorage {
 
     const commentBlock = commentMatch[0];
     const info = this.parseCommentBlock(commentBlock);
+    const supportedSources = this.parseSupportedSources(script);
 
     return {
       id: `user_api_${Math.random().toString().substring(2, 5)}_${Date.now()}`,
@@ -135,6 +152,7 @@ export class ScriptStorage {
       homepage: info.homepage || "",
       version: info.version || "",
       rawScript: script,
+      supportedSources,
     };
   }
 
@@ -190,12 +208,17 @@ export class ScriptStorage {
       updatedAt: Date.now(),
     };
 
+    const isFirstScript = this.scripts.size === 0;
     this.scripts.set(scriptInfo.id, storageItem);
-    this.saveToStorage();
+    await this.saveToStorage();
+
+    if (isFirstScript) {
+      console.log(`🎯 第一个脚本，自动设置为默认音源: ${scriptInfo.name}`);
+      await this.setDefaultSource(scriptInfo.id);
+    }
 
     console.log(`✅ 脚本导入成功: ${scriptInfo.name} (ID: ${scriptInfo.id})`);
     console.log(`   支持音源: ${supportedSources.join(', ')}`);
-
     return scriptInfo;
   }
 
@@ -244,10 +267,9 @@ export class ScriptStorage {
     };
 
     this.scripts.set(id, updatedItem);
-    this.saveToStorage();
+    await this.saveToStorage();
 
     console.log(`🔄 脚本更新成功: ${scriptInfo.name}`);
-
     return scriptInfo;
   }
 
@@ -267,6 +289,7 @@ export class ScriptStorage {
       homepage: item.homepage,
       version: item.version,
       rawScript: decompressedScript,
+      supportedSources: item.supportedSources,
     };
   }
 
@@ -290,6 +313,7 @@ export class ScriptStorage {
         homepage: item.homepage,
         version: item.version,
         rawScript: "",
+        supportedSources: item.supportedSources,
       });
     }
     return result;
@@ -307,6 +331,7 @@ export class ScriptStorage {
         homepage: item.homepage,
         version: item.version,
         rawScript: decompressedScript,
+        supportedSources: item.supportedSources,
       });
     }
     return result;
@@ -325,19 +350,29 @@ export class ScriptStorage {
     return result;
   }
 
-  removeScript(id: string): boolean {
+  async removeScript(id: string): Promise<boolean> {
     const deleted = this.scripts.delete(id);
     if (deleted) {
-      if (this.defaultSourceId === id) {
-        this.defaultSourceId = null;
+      const wasDefault = this.defaultSourceId === id;
+      
+      if (wasDefault) {
+        const remainingScripts = Array.from(this.scripts.keys());
+        if (remainingScripts.length > 0) {
+          this.defaultSourceId = remainingScripts[0];
+          console.log(`🎯 默认音源已删除，自动设置新的默认音源: ${this.defaultSourceId}`);
+        } else {
+          this.defaultSourceId = null;
+          console.log(`🎯 默认音源已删除，没有剩余的音源`);
+        }
       }
-      this.saveToStorage();
+      
+      await this.saveToStorage();
       console.log(`🗑️ 脚本已删除: ${id}`);
     }
     return deleted;
   }
 
-  removeScripts(ids: string[]): number {
+  async removeScripts(ids: string[]): Promise<number> {
     let removed = 0;
     for (const id of ids) {
       if (this.scripts.delete(id)) {
@@ -348,13 +383,13 @@ export class ScriptStorage {
       }
     }
     if (removed > 0) {
-      this.saveToStorage();
+      await this.saveToStorage();
       console.log(`🗑️ 已删除 ${removed} 个脚本`);
     }
     return removed;
   }
 
-  setAllowShowUpdateAlert(id: string, enable: boolean): boolean {
+  async setAllowShowUpdateAlert(id: string, enable: boolean): Promise<boolean> {
     const item = this.scripts.get(id);
     if (!item) {
       return false;
@@ -362,7 +397,7 @@ export class ScriptStorage {
 
     item.allowShowUpdateAlert = enable;
     item.updatedAt = Date.now();
-    this.saveToStorage();
+    await this.saveToStorage();
 
     return true;
   }
@@ -371,7 +406,7 @@ export class ScriptStorage {
     return this.scripts.get(id)?.allowShowUpdateAlert ?? false;
   }
 
-  setDefaultSource(id: string): boolean {
+  async setDefaultSource(id: string): Promise<boolean> {
     if (!this.scripts.has(id)) {
       console.warn(`⚠️ 脚本不存在: ${id}`);
       return false;
@@ -382,7 +417,7 @@ export class ScriptStorage {
     }
 
     this.defaultSourceId = id;
-    this.saveToStorage();
+    await this.saveToStorage();
 
     const scriptName = this.scripts.get(id)?.name || id;
     console.log(`🎯 默认音源已设置: ${scriptName} (${id})`);

@@ -10,6 +10,7 @@ export interface ScriptInfo {
   homepage: string;
   version: string;
   rawScript: string;
+  supportedSources: string[];
 }
 
 export interface MusicUrlRequest {
@@ -28,13 +29,28 @@ export interface MusicUrlRequest {
   };
 }
 
+export interface MusicUrlData {
+  type: string;
+  url: string;
+}
+
+export interface LyricData {
+  type: string;
+  lyric: string;
+  tlyric: string | null;
+  rlyric: string | null;
+  lxlyric: string | null;
+}
+
+export interface PicData {
+  type: string;
+  url: string;
+}
+
 export interface MusicUrlResponse {
   source: string;
   action: string;
-  data: {
-    type: string;
-    url: string;
-  };
+  data: MusicUrlData | LyricData | PicData;
 }
 
 export class ScriptEngine {
@@ -78,8 +94,11 @@ export class ScriptEngine {
   async getMusicUrl(request: MusicUrlRequest): Promise<MusicUrlResponse> {
     const { source, info } = request;
 
+    console.log(`🔍 getMusicUrl 被调用: source=${source}, info=${JSON.stringify(info)}`);
+
     for (const [scriptId, sandbox] of this.sandboxes) {
       try {
+        console.log(`🔍 检查脚本 ${scriptId} 是否支持音源 ${source}: ${sandbox.supportsSource(source)}`);
         if (sandbox.supportsSource(source)) {
           const response = await sandbox.request(request);
           if (response) {

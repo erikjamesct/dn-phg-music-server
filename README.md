@@ -155,10 +155,12 @@ Content-Type: application/json
 #### 设置默认音源
 
 ```bash
-PUT /api/scripts/:id/default
+POST /api/scripts/default
 Content-Type: application/json
 
-{}
+{
+  "id": "user_api_abc123"
+}
 ```
 
 响应:
@@ -172,8 +174,15 @@ Content-Type: application/json
 #### 删除脚本
 
 ```bash
-DELETE /api/scripts/:id
+POST /api/scripts/delete
+Content-Type: application/json
+
+{
+  "id": "user_api_abc123"
+}
 ```
+
+**注意**: 如果删除的是默认音源，系统会自动设置剩余的第一个音源为默认音源。
 
 ### 音乐播放
 
@@ -318,9 +327,9 @@ curl -X POST https://your-project.deno.dev/api/scripts/import/url \
 curl https://your-project.deno.dev/api/scripts/loaded
 
 # 假设返回的 id 是 user_api_abc123
-curl -X PUT https://your-project.deno.dev/api/scripts/user_api_abc123/default \
+curl -X POST https://your-project.deno.dev/api/scripts/default \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"id":"user_api_abc123"}'
 ```
 
 ### 5. 获取音乐播放URL
@@ -346,7 +355,9 @@ curl https://your-project.deno.dev/api/scripts/loaded
 ### 7. 删除脚本
 
 ```bash
-curl -X DELETE https://your-project.deno.dev/api/scripts/user_api_abc123
+curl -X POST https://your-project.deno.dev/api/scripts/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"user_api_abc123"}'
 ```
 
 ## 脚本开发指南

@@ -34,13 +34,13 @@ export class APIRoutes {
     router.post("/api/scripts", (ctx) => this.handleImportScript(ctx));
     router.get("/api/scripts/loaded", () => this.handleGetLoadedScripts());
     router.get("/api/scripts/:id", (ctx) => this.handleGetScript(ctx));
-    router.delete("/api/scripts/:id", (ctx) => this.handleRemoveScript(ctx));
+    router.post("/api/scripts/delete", (ctx) => this.handleRemoveScript(ctx));
     router.put("/api/scripts/:id", (ctx) => this.handleUpdateScript(ctx));
 
     router.post("/api/scripts/import/url", (ctx) => this.handleImportScriptFromUrl(ctx));
     router.post("/api/scripts/import/file", (ctx) => this.handleImportScriptFromFile(ctx));
 
-    router.put("/api/scripts/:id/default", (ctx) => this.handleSetDefaultSource(ctx));
+    router.post("/api/scripts/default", (ctx) => this.handleSetDefaultSource(ctx));
     router.get("/api/scripts/default", () => this.handleGetDefaultSource());
 
     router.post("/api/music/url", (ctx) => this.handleGetMusicUrl(ctx));
@@ -133,9 +133,9 @@ export class APIRoutes {
 <span class="api-method post">POST</span> <code>/api/scripts/import/file</code>        - 从文件导入脚本
 
 <span class="api-method put">PUT</span>  <code>/api/scripts/:id</code>                - 更新脚本
-<span class="api-method put">PUT</span>  <code>/api/scripts/:id/default</code>        - 设置默认音源
+<span class="api-method post">POST</span> <code>/api/scripts/default</code>           - 设置默认音源
 
-<span class="api-method delete">DELETE</span> <code>/api/scripts/:id</code>              - 删除脚本
+<span class="api-method post">POST</span> <code>/api/scripts/delete</code>              - 删除脚本
 </pre>
     </div>
 
@@ -469,8 +469,23 @@ export class APIRoutes {
 
   private async handleRemoveScript(ctx: any): Promise<Response> {
     try {
-      const { id } = ctx.params;
-      const removed = this.storage.removeScript(id);
+      const body = await ctx.req.json();
+      const { id } = body;
+      
+      if (!id) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            message: "缺少脚本ID参数",
+          }),
+          {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+      
+      const removed = await this.storage.removeScript(id);
 
       if (removed) {
         await this.engine.unloadScript(id);
@@ -536,17 +551,28 @@ export class APIRoutes {
 
   private async handleSetDefaultSource(ctx: any): Promise<Response> {
     try {
-      const { id } = ctx.params;
       const body = await ctx.req.json();
+      const { id } = body;
       
-      const success = this.storage.setDefaultSource(id);
+      if (!id) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            message: "缺少脚本ID参数",
+          }),
+          {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
       
-      if (success) {
-        const scriptInfo = this.storage.getScript(id);
-        if (scriptInfo) {
-          await this.engine.unloadScript(id);
-          await this.engine.loadScript(scriptInfo);
-        }
+      const success = await this.storage.setDefaultSource(id);
+      const scriptInfo = this.storage.getScript(id);
+      
+      if (success && scriptInfo) {
+        await this.engine.unloadScript(id);
+        await this.engine.loadScript(scriptInfo);
       }
 
       return new Response(
@@ -631,25 +657,29 @@ export class APIRoutes {
         },
       });
 
-      if (result.status) {
-        return new Response(
-          JSON.stringify({
-            success: true,
-            url: result.data.result.url,
-            type: result.data.result.type,
-            source: body.source,
-            quality: body.quality,
-          }),
-          {
-            headers: { "Content-Type": "application/json" },
-          }
-        );
+      if (result.status && result.data && result.data.data) {
+        const musicUrlData = result.data.data as { url: string; type: string };
+        if (musicUrlData.url) {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              url: musicUrlData.url,
+              type: musicUrlData.type,
+              source: body.source,
+              quality: body.quality,
+            }),
+            {
+              headers: { "Content-Type": "application/json" },
+            }
+          );
+        }
       }
 
       return new Response(
         JSON.stringify({
           success: false,
           error: result.message || "获取播放URL失败",
+          source: body.source,
         }),
         {
           status: 500,

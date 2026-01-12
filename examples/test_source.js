@@ -74,7 +74,46 @@ const testApi = {
   },
 };
 
+// 注册请求处理函数
+console.log('开始注册请求处理函数...');
+lx.on('request', async(data) => {
+  console.log(`收到请求: ${data.source} - ${data.action}`);
+  
+  const { source, action, info } = data;
+  
+  console.log(`收到请求: ${source} - ${action}`);
+  
+  try {
+    let result;
+    
+    switch (action) {
+      case 'musicUrl':
+        result = await testApi.getMusicUrl(info.musicInfo, info.type);
+        return result.url;
+        
+      case 'lyric':
+        result = await testApi.getLyric(info.musicInfo);
+        return result;
+        
+      case 'pic':
+        console.log(`处理封面请求: ${source}`);
+        result = await testApi.getPic(info.musicInfo);
+        console.log(`封面结果: ${result}`);
+        return result;
+        
+      default:
+        throw new Error(`不支持的 action: ${action}`);
+    }
+  } catch (error) {
+    console.error(`请求处理失败: ${error.message}`);
+    throw error;
+  }
+});
+
+console.log('请求处理函数注册完成');
+
 // 初始化脚本
+console.log('开始初始化脚本...');
 lx.send('inited', {
   sources: {
     kw: {
@@ -105,37 +144,6 @@ lx.send('inited', {
   },
 }).then(() => {
   console.log('测试音乐源初始化成功');
-}).catch((err) => {
-  console.error('测试音乐源初始化失败:', err.message);
-});
-
-// 注册请求处理
-lx.on('request', async(data) => {
-  const { source, action, info } = data;
-  
-  console.log(`收到请求: ${source} - ${action}`);
-  
-  try {
-    let result;
-    
-    switch (action) {
-      case 'musicUrl':
-        result = await testApi.getMusicUrl(info.musicInfo, info.type);
-        return result.url;
-        
-      case 'lyric':
-        result = await testApi.getLyric(info.musicInfo);
-        return result;
-        
-      case 'pic':
-        result = await testApi.getPic(info.musicInfo);
-        return result;
-        
-      default:
-        throw new Error(`不支持的操作: ${action}`);
-    }
-  } catch (error) {
-    console.error(`请求处理失败: ${error.message}`);
-    throw error;
-  }
+}).catch((error) => {
+  console.error('脚本初始化失败:', error);
 });
