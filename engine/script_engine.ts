@@ -22,9 +22,16 @@ export interface MusicUrlRequest {
       id: string;
       name: string;
       singer: string;
-      albumName?: string;
-      songmid: string;
       source: string;
+      interval: string | null;
+      meta: {
+        songId: string | number;
+        albumName: string;
+        picUrl?: string | null;
+        hash?: string;
+        strMediaMid?: string;
+        copyrightId?: string;
+      };
     };
   };
 }
@@ -57,9 +64,11 @@ export class ScriptEngine {
   private sandboxes: Map<string, Sandbox> = new Map();
   private requestManager: RequestManager;
   private activeScripts: Map<string, ScriptInfo> = new Map();
+  private storage: any;
 
-  constructor() {
+  constructor(storage?: any) {
     this.requestManager = new RequestManager();
+    this.storage = storage;
   }
 
   async loadScript(scriptInfo: ScriptInfo): Promise<boolean> {
@@ -74,6 +83,11 @@ export class ScriptEngine {
       if (registeredSources.length > 0) {
         scriptInfo.supportedSources = registeredSources;
         console.log(`📋 更新脚本支持的音源: ${registeredSources.join(', ')}`);
+        
+        if (this.storage) {
+          await this.storage.updateScriptSupportedSources(scriptInfo.id, registeredSources);
+          console.log(`💾 已更新存储中的脚本音源信息: ${scriptInfo.id}`);
+        }
       }
 
       this.sandboxes.set(scriptInfo.id, sandbox);
@@ -107,9 +121,10 @@ export class ScriptEngine {
         console.log(`🔍 检查脚本 ${scriptId} 是否支持音源 ${source}: ${sandbox.supportsSource(source)}`);
         if (sandbox.supportsSource(source)) {
           const response = await sandbox.request(request);
-          if (response) {
+          if (response && response.data && request.action === 'musicUrl' && (response.data as MusicUrlData).url) {
             return response;
           }
+          console.log(`⚠️ 脚本 ${scriptId} 返回了无效响应，继续尝试下一个脚本`);
         }
       } catch (error) {
         console.error(`脚本执行错误 [${scriptId}]:`, error);

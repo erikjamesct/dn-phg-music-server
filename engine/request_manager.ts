@@ -21,6 +21,14 @@ interface RequestCallback {
   (error: Error | null, response: Response | null, body: any): void;
 }
 
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36';
+
+const API_CONFIG = {
+  oldServers: ['tempmusics.tk', 'tempmusic.xyz', 'tempmusic.top', 'api.lxmusic.ml', 'api.lxmusic.xyz'],
+  newServer: 'https://lxmusicapi.onrender.com',
+  requestKey: 'share-v2',
+};
+
 export class RequestManager {
   private activeRequests: Map<string, AbortController> = new Map();
   private proxyConfig: { host: string; port: string } = { host: '', port: '' };
@@ -79,6 +87,7 @@ export class RequestManager {
       }
 
       const headers: Record<string, string> = {
+        'User-Agent': DEFAULT_USER_AGENT,
         ...options.headers,
       };
 
@@ -86,6 +95,11 @@ export class RequestManager {
 
       if (requestContentType && !headers['Content-Type']) {
         headers['Content-Type'] = requestContentType;
+      }
+
+      if (this.shouldAddApiKey(options.url)) {
+        headers['X-Request-Key'] = API_CONFIG.requestKey;
+        console.log(`🔑 为 API 请求添加认证头: X-Request-Key`);
       }
 
       if (this.proxyConfig.host && !this.isLocalUrl(options.url)) {
@@ -233,9 +247,29 @@ export class RequestManager {
         return mirrorUrl.toString();
       }
       
+      for (const oldServer of API_CONFIG.oldServers) {
+        if (urlObj.hostname === oldServer || urlObj.hostname.endsWith('.' + oldServer)) {
+          const pathParts = urlObj.pathname.split('/').filter(p => p);
+          if (pathParts.length >= 3) {
+            const newUrl = new URL(`${API_CONFIG.newServer}/${pathParts.slice(1).join('/')}`);
+            console.log(`🔄 检测到旧API服务器 (${urlObj.hostname})，重定向到新API服务器: ${newUrl.toString()}`);
+            return newUrl.toString();
+          }
+        }
+      }
+      
       return null;
     } catch {
       return null;
+    }
+  }
+
+  private shouldAddApiKey(url: string): boolean {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.hostname === new URL(API_CONFIG.newServer).hostname;
+    } catch {
+      return false;
     }
   }
 

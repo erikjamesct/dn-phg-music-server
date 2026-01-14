@@ -1,0 +1,17 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:crypto-js@*": "4.2.0",
+    "npm:jsrsasign@*": "11.1.0"
+  },
+  "npm": {
+    "crypto-js@4.2.0": {
+      "integrity": "sha512-KALDyEYgpY+Rlob/iriUtjV6d5Eq+Y191A5g4UqLAi8CyGP9N1+FdVbkc1SxKc2r4YAYqG8JzO2KGL+AizD70Q==",
+      "tarball": "https://registry.npmmirror.com/crypto-js/-/crypto-js-4.2.0.tgz"
+    },
+    "jsrsasign@11.1.0": {
+      "integrity": "sha512-Ov74K9GihaK9/9WncTe1mPmvrO7Py665TUfUKvraXBpu+xcTWitrtuOwcjf4KMU9maPaYn0OuaWy0HOzy/GBXg==",
+      "tarball": "https://registry.npmmirror.com/jsrsasign/-/jsrsasign-11.1.0.tgz"
+    }
+  }
+}

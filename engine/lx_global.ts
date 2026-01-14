@@ -1,6 +1,11 @@
 import { ScriptInfo, MusicUrlRequest, MusicUrlResponse } from "./script_engine.ts";
 import { RequestManager } from "./request_manager.ts";
 
+// @ts-ignore
+import * as jsrsasign from "npm:jsrsasign";
+// @ts-ignore
+import CryptoJS from "npm:crypto-js";
+
 const SBOX = [
   0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
   0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -410,16 +415,7 @@ function md5Hash(message: Uint8Array): Uint8Array {
 }
 
 function md5(str: string): string {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(str);
-  const hash = md5Hash(data);
-  
-  let result = '';
-  for (let i = 0; i < hash.length; i++) {
-    result += hash[i].toString(16).padStart(2, '0');
-  }
-  
-  return result;
+  return CryptoJS.MD5(str).toString();
 }
 
 function bufferConcat(buf1: Uint8Array, buf2: Uint8Array): Uint8Array {
@@ -461,6 +457,8 @@ const EVENT_NAMES = {
   updateAlert: 'updateAlert',
 };
 
+export { EVENT_NAMES };
+
 const allSources = ['kw', 'kg', 'tx', 'wy', 'mg', 'local'];
 
 const supportQualitys: Record<string, string[]> = {
@@ -490,6 +488,7 @@ export class LXGlobal {
   private events: Record<string, Function> = {};
   private context: any = null;
   public registeredSources: Record<string, SourceInfo> = {};
+  public initError: string | null = null;
 
   constructor(
     scriptInfo: ScriptInfo,
@@ -497,6 +496,16 @@ export class LXGlobal {
   ) {
     this.scriptInfo = scriptInfo;
     this.requestManager = requestManager;
+  }
+
+  private onError(errorMessage: string): void {
+    if (this.isInited) return;
+    this.isInited = true;
+    if (errorMessage.length > 1024) {
+      errorMessage = errorMessage.substring(0, 1024) + '...';
+    }
+    this.initError = errorMessage;
+    console.error(`❌ 脚本初始化错误: ${errorMessage}`);
   }
 
   createGlobalObject(): any {
@@ -640,7 +649,11 @@ export class LXGlobal {
           });
 
           if (callback) {
-            callback.call(abortController, null, response, responseBody);
+            try {
+              callback.call(abortController, null, response, responseBody);
+            } catch (err: any) {
+              self.onError(err.message);
+            }
           }
         };
 
@@ -721,16 +734,32 @@ export class LXGlobal {
             console.log(`🔍 rsaEncrypt key内容前50字符: ${key.substring(0, 50)}`);
             
             try {
-              // 简单的RSA加密模拟 - 使用简单的 XOR 加密代替
-              // 注意：这不提供真正的RSA安全性，只是为了兼容脚本不报错
-              const encoder = new TextEncoder();
-              const keyBytes = encoder.encode(key);
-              const keyLen = keyBytes.length;
+              // 参考桌面版实现：填充buffer到128字节
+              const paddedBuffer = new Uint8Array(128);
+              paddedBuffer.set(new Uint8Array(128 - buffer.length), 0);
+              paddedBuffer.set(buffer, 128 - buffer.length);
               
-              const encrypted = new Uint8Array(buffer.length);
-              for (let i = 0; i < buffer.length; i++) {
-                encrypted[i] = buffer[i] ^ keyBytes[i % keyLen];
-              }
+              console.log(`🔍 填充后buffer长度: ${paddedBuffer.length}`);
+              
+              // 使用jsrsasign库实现RSA_NO_PADDING加密
+              // 将buffer转换为十六进制字符串
+              const hex = Array.from(paddedBuffer)
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+              
+              console.log(`🔍 填充后buffer的hex表示前50字符: ${hex.substring(0, 50)}`);
+              
+              // 使用RSA_NO_PADDING模式加密
+              const rsa = new (jsrsasign as any).RSAKey();
+              rsa.setPublic(key, '10001'); // 10001是RSA公钥指数的十六进制表示(65537)
+              
+              // 使用encryptRaw方法实现RSA_NO_PADDING
+              const encryptedHex = rsa.encryptRaw(hex);
+              
+              console.log(`🔍 加密结果hex长度: ${encryptedHex.length}`);
+              
+              // 将加密结果转换回Uint8Array
+              const encrypted = new Uint8Array(encryptedHex.match(/.{1,2}/g)!.map((byte: string) => parseInt(byte, 16)));
               
               console.log(`✅ rsaEncrypt 完成: 输出长度=${encrypted.length}`);
               return encrypted;
@@ -772,6 +801,13 @@ export class LXGlobal {
               let result = '';
               for (let i = 0; i < buf.length; i++) {
                 result += String.fromCharCode(buf[i]);
+              }
+              return result;
+            }
+            if (format === 'hex') {
+              let result = '';
+              for (let i = 0; i < buf.length; i++) {
+                result += buf[i].toString(16).padStart(2, '0');
               }
               return result;
             }
@@ -869,22 +905,17 @@ export class LXGlobal {
 
     try {
       for (const source of allSources) {
-        const userSource = info.sources?.[source];
+        const userSource = info.sources[source];
         if (!userSource || userSource.type !== 'music') continue;
 
-        const qualitys = supportQualitys[source] || [];
-        const actions = supportActions[source] || [];
+        const qualitys = supportQualitys[source];
+        const actions = supportActions[source];
 
-        const filteredActions = actions.filter((a: string) => userSource.actions?.includes(a));
-        const filteredQualitys = qualitys.filter((q: string) => userSource.qualitys?.includes(q));
-
-        if (filteredActions.length > 0) {
-          sourceInfo.sources[source] = {
-            type: 'music',
-            actions: filteredActions,
-            qualitys: filteredQualitys,
-          };
-        }
+        sourceInfo.sources[source] = {
+          type: 'music',
+          actions: actions.filter((a: string) => userSource.actions.includes(a)),
+          qualitys: qualitys.filter((q: string) => userSource.qualitys.includes(q)),
+        };
       }
 
       if (Object.keys(sourceInfo.sources).length === 0) {
@@ -922,6 +953,73 @@ export class LXGlobal {
 
     console.log(`📢 Update alert shown: ${data.log}`);
     resolve();
+  }
+
+  public async handleRequest(data: { source: string; action: string; info: any }): Promise<any> {
+    console.log(`🔍 LXGlobal.handleRequest 被调用: source=${data.source}, action=${data.action}`);
+
+    if (!this.events.request) {
+      throw new Error('Request event is not defined');
+    }
+
+    try {
+      const response = await this.events.request.call(this.context, {
+        source: data.source,
+        action: data.action,
+        info: data.info,
+      });
+
+      console.log(`✅ 请求成功: action=${data.action}`);
+
+      switch (data.action) {
+        case 'musicUrl':
+          if (typeof response !== 'string' || response.length > 2048 || !/^https?:/.test(response)) {
+            throw new Error('Invalid music URL response');
+          }
+          return {
+            source: data.source,
+            action: data.action,
+            data: {
+              type: data.info.type,
+              url: response,
+            },
+          };
+
+        case 'lyric':
+          if (typeof response !== 'object' || typeof response.lyric !== 'string') {
+            throw new Error('Invalid lyric response');
+          }
+          if (response.lyric.length > 51200) {
+            throw new Error('Lyric too long');
+          }
+          return {
+            source: data.source,
+            action: data.action,
+            data: {
+              lyric: response.lyric,
+              tlyric: typeof response.tlyric === 'string' && response.tlyric.length < 5120 ? response.tlyric : null,
+              rlyric: typeof response.rlyric === 'string' && response.rlyric.length < 5120 ? response.rlyric : null,
+              lxlyric: typeof response.lxlyric === 'string' && response.lxlyric.length < 8192 ? response.lxlyric : null,
+            },
+          };
+
+        case 'pic':
+          if (typeof response !== 'string' || response.length > 2048 || !/^https?:/.test(response)) {
+            throw new Error('Invalid picture URL response');
+          }
+          return {
+            source: data.source,
+            action: data.action,
+            data: response,
+          };
+
+        default:
+          throw new Error(`Unknown action: ${data.action}`);
+      }
+    } catch (error) {
+      console.error(`❌ 请求处理错误: ${error}`);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   public getRegisteredSources(): Record<string, SourceInfo> {

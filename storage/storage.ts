@@ -225,13 +225,47 @@ export class ScriptStorage {
   async importScriptFromUrl(url: string): Promise<ScriptInfo> {
     console.log(`🌐 从URL导入脚本: ${url}`);
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`下载失败: ${response.status} ${response.statusText}`);
+    if (!/^https?:\/\//.test(url)) {
+      throw new Error("无效的URL格式");
     }
 
-    const script = await response.text();
-    return this.importScript(script);
+    const MAX_SCRIPT_SIZE = 9_000_000;
+    const TIMEOUT = 30_000;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT);
+
+    try {
+      const response = await fetch(url, {
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`下载失败: ${response.status} ${response.statusText}`);
+      }
+
+      const contentLength = response.headers.get('content-length');
+      if (contentLength && parseInt(contentLength) > MAX_SCRIPT_SIZE) {
+        throw new Error(`脚本过大: ${contentLength} 字节 (最大 ${MAX_SCRIPT_SIZE} 字节)`);
+      }
+
+      const script = await response.text();
+
+      if (script.length > MAX_SCRIPT_SIZE) {
+        throw new Error(`脚本过大: ${script.length} 字节 (最大 ${MAX_SCRIPT_SIZE} 字节)`);
+      }
+
+      return this.importScript(script);
+    } catch (error: any) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('请求超时');
+      }
+      throw error;
+    }
   }
 
   async importScriptFromFile(fileContent: string, fileName?: string): Promise<ScriptInfo> {
@@ -506,5 +540,20 @@ export class ScriptStorage {
     }
 
     return null;
+  }
+
+  async updateScriptSupportedSources(id: string, supportedSources: string[]): Promise<boolean> {
+    const item = this.scripts.get(id);
+    if (!item) {
+      console.warn(`⚠️ 脚本不存在: ${id}`);
+      return false;
+    }
+
+    item.supportedSources = supportedSources;
+    item.updatedAt = Date.now();
+    await this.saveToStorage();
+
+    console.log(`🔄 脚本音源已更新: ${item.name} (${id}) - ${supportedSources.join(', ')}`);
+    return true;
   }
 }

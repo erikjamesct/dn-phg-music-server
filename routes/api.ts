@@ -634,13 +634,17 @@ export class APIRoutes {
         id: body.songmid || body.id || '',
         name: body.name,
         singer: body.singer,
-        albumName: body.albumName || '',
-        songmid: body.songmid || body.id || '',
         source: body.source,
-        hash: body.hash,
-        songId: body.songId,
-        copyrightId: body.copyrightId,
-        strMediaMid: body.strMediaMid,
+        interval: body.interval || null,
+        songmid: body.songmid || body.id || body.songId || '',
+        meta: {
+          songId: body.songmid || body.id || body.songId || '',
+          albumName: body.albumName || '',
+          picUrl: body.picUrl || null,
+          hash: body.hash,
+          strMediaMid: body.strMediaMid,
+          copyrightId: body.copyrightId,
+        },
       };
 
       const requestKey = `music_${Date.now()}_${Math.random().toString(36).substring(7)}`;

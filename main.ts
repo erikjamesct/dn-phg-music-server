@@ -14,7 +14,7 @@ const originalUnhandledRejection = (globalThis as any).onunhandledrejection;
 
 const app = new Application();
 const storage = new ScriptStorage();
-const engine = new ScriptEngine();
+const engine = new ScriptEngine(storage);
 const handler = new RequestHandler(engine, storage);
 
 await storage.ready();

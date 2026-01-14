@@ -1,6 +1,6 @@
 import { ScriptInfo, MusicUrlRequest, MusicUrlResponse } from "./script_engine.ts";
 import { RequestManager } from "./request_manager.ts";
-import { LXGlobal } from "./lx_global.ts";
+import { LXGlobal, EVENT_NAMES } from "./lx_global.ts";
 
 export class Sandbox {
   private scriptInfo: ScriptInfo;
@@ -76,6 +76,7 @@ export class Sandbox {
         const originalHistory = (globalThis as any).history;
         const originalXMLHttpRequest = (globalThis as any).XMLHttpRequest;
         const originalWebSocket = (globalThis as any).WebSocket;
+        const originalFetch = (globalThis as any).fetch;
         
         const mockWindow = {
           ...globalThis,
@@ -418,6 +419,152 @@ export class Sandbox {
             }
           };
         })();
+
+        (globalThis as any).fetch = (() => {
+          const requestManager = this.requestManager;
+          const nativeFetch = originalFetch;
+          
+          return async function fetch(url: string | Request, init?: RequestInit): Promise<Response> {
+            const method = init?.method || 'GET';
+            const headers = init?.headers as Record<string, string> || {};
+            const body = init?.body;
+            const signal = init?.signal || null;
+
+            let requestBody: any;
+            let formData: Record<string, any> | undefined;
+            let form: Record<string, any> | undefined;
+
+            if (typeof body === 'string') {
+              requestBody = body;
+            } else if (body instanceof FormData) {
+              formData = {};
+              for (const [key, value] of body.entries()) {
+                formData[key] = value;
+              }
+            } else if (body instanceof URLSearchParams) {
+              form = {};
+              for (const [key, value] of body.entries()) {
+                form[key] = value;
+              }
+            } else if (body && typeof body === 'object') {
+              requestBody = body;
+            }
+
+            const urlString = typeof url === 'string' ? url : url.url;
+
+            const requestOptions = {
+              url: urlString,
+              method,
+              headers,
+              timeout: 60000,
+              body: requestBody,
+              form,
+              formData,
+            };
+
+            if (nativeFetch) {
+              try {
+                const nativeResponse = await nativeFetch(urlString, {
+                  method,
+                  headers,
+                  body: requestBody,
+                  signal,
+                });
+
+                const responseBody = await nativeResponse.arrayBuffer();
+                const bytes = responseBody.byteLength;
+
+                const rawUint8Array = new Uint8Array(responseBody);
+                const rawString = new TextDecoder().decode(responseBody);
+                let parsedBody: any = rawString;
+
+                try {
+                  parsedBody = JSON.parse(rawString);
+                } catch (e) {
+                  parsedBody = rawString;
+                }
+
+                const responseInit: ResponseInit = {
+                  status: nativeResponse.status,
+                  statusText: nativeResponse.statusText,
+                  headers: nativeResponse.headers,
+                };
+
+                const responseObj = new Response(rawString, responseInit);
+                (responseObj as any)._raw = rawUint8Array;
+                (responseObj as any)._body = parsedBody;
+
+                return responseObj;
+              } catch (error: any) {
+                if (error.name === 'AbortError') {
+                  const abortError = new DOMException('The operation was aborted.', 'AbortError');
+                  throw abortError;
+                }
+                throw error;
+              }
+            } else {
+              return new Promise((resolve, reject) => {
+                const abortController = new AbortController();
+                const effectiveSignal = signal || abortController.signal;
+
+                requestManager.addRequest(requestOptions, (error: Error | null, response: any | null, responseBody: any) => {
+                  if (error) {
+                    if (error.message === 'Request cancelled') {
+                      const abortError = new DOMException('The operation was aborted.', 'AbortError');
+                      reject(abortError);
+                    } else {
+                      reject(error);
+                    }
+                    return;
+                  }
+
+                  if (!response) {
+                    reject(new Error('No response received'));
+                    return;
+                  }
+
+                  const headersMap = new Headers(response.headers);
+                  
+                  const responseInit: ResponseInit = {
+                    status: response.statusCode,
+                    statusText: response.statusMessage,
+                    headers: headersMap,
+                  };
+
+                  let bodyInit: BodyInit;
+                  if (typeof responseBody === 'string') {
+                    bodyInit = responseBody;
+                  } else if (responseBody instanceof Uint8Array) {
+                    bodyInit = new TextDecoder().decode(responseBody);
+                  } else if (responseBody && typeof responseBody === 'object') {
+                    bodyInit = JSON.stringify(responseBody);
+                  } else {
+                    bodyInit = '';
+                  }
+
+                  const responseObj = new Response(bodyInit, responseInit);
+                  
+                  (responseObj as any)._raw = response.raw;
+                  (responseObj as any)._body = responseBody;
+                  
+                  resolve(responseObj);
+                });
+
+                const handleAbort = () => {
+                  abortController.abort();
+                };
+
+                if (effectiveSignal) {
+                  if (effectiveSignal.aborted) {
+                    handleAbort();
+                  } else {
+                    effectiveSignal.addEventListener('abort', handleAbort);
+                  }
+                }
+              });
+            }
+          };
+        })();
         (globalThis as any).WebSocket = class {
           constructor() {}
           send() {}
@@ -440,6 +587,16 @@ export class Sandbox {
           length: 0,
         };
         
+        (globalThis as any).__lx_init_error_handler__ = {
+          sendError: (errorMessage: string) => {
+            console.error(`❌ 脚本初始化错误: ${errorMessage}`);
+            if (!this.lxGlobal['isInited']) {
+              this.lxGlobal['isInited'] = true;
+              console.log(`⚠️ 脚本初始化失败，但服务器将继续运行`);
+            }
+          },
+        };
+        
         const originalUnhandledRejection = (globalThis as any).onunhandledrejection;
         (globalThis as any).onunhandledrejection = (event: any) => {
           console.error(`🔍 脚本中未捕获的 Promise 错误:`, event.reason);
@@ -451,6 +608,15 @@ export class Sandbox {
         (globalThis as any).onuncaughtException = (error: any) => {
           console.error(`🔍 脚本中未捕获的异常:`, error);
           console.error(`🔍 异常堆栈:`, error?.stack);
+        };
+        
+        const originalWindowError = (globalThis as any).onerror;
+        (globalThis as any).onerror = (message: string, source: string, lineno: number, colno: number, error: Error) => {
+          console.error(`🔍 脚本中未捕获的错误:`, message);
+          console.error(`🔍 错误堆栈:`, error?.stack);
+          if ((globalThis as any).__lx_init_error_handler__) {
+            (globalThis as any).__lx_init_error_handler__.sendError(message.replace(/^Uncaught\sError:\s/, ''));
+          }
         };
         
         console.log(`🔍 开始执行脚本（直接执行，不包装）`);
@@ -469,8 +635,12 @@ export class Sandbox {
               console.log(`⚠️ 脚本初始化时出现错误，但服务器将继续运行`);
             }
           }
-          
-          console.log(`🔍 等待 500ms 让所有异步操作完成`);
+        } catch (scriptError) {
+          console.error(`🔍 脚本执行错误:`, scriptError);
+          console.log(`⚠️ 脚本初始化时出现错误，但服务器将继续运行`);
+        }
+        
+        console.log(`🔍 等待 500ms 让所有异步操作完成`);
         await new Promise(resolve => setTimeout(resolve, 500));
         console.log(`🔍 异步操作等待完成`);
         
@@ -480,10 +650,6 @@ export class Sandbox {
         if (!this.lxGlobal['isInited']) {
           console.warn(`⚠️ 脚本未调用 lx.send('inited', ...)，音源可能未正确注册`);
         }
-      } catch (error) {
-        console.error(`🔍 脚本执行错误:`, error);
-        console.log(`⚠️ 脚本初始化时出现错误，但服务器将继续运行`);
-      }
         
         (globalThis as any).onunhandledrejection = originalUnhandledRejection;
         (globalThis as any).onuncaughtException = originalUncaughtException;
@@ -493,8 +659,8 @@ export class Sandbox {
         console.log(`🔍 lx.on: ${typeof lxObject.on}`);
         
         if (typeof lxObject.requestHandler === 'function') {
-          console.log(`🔍 找到 lx.requestHandler，设置为 events.request`);
-          this.lxGlobal.registerRequestHandler(lxObject.requestHandler);
+          console.log(`🔍 找到 lx.requestHandler，调用 lx.on('request', handler)`);
+          await lxObject.on(EVENT_NAMES.request, lxObject.requestHandler);
         }
         
         console.log(`🔍 检查 lx 对象上的所有属性:`);
@@ -527,7 +693,8 @@ export class Sandbox {
     
     try {
       const result = await this.lxGlobal.handleRequest(data);
-      return this.validateResponse(result, data.action);
+      console.log(`✅ Sandbox.handleRequest 成功:`, result);
+      return result;
     } catch (error) {
       console.error(`❌ 请求处理错误: ${this.scriptInfo.name}`, error);
       
@@ -574,16 +741,31 @@ export class Sandbox {
 
     switch (action) {
       case 'musicUrl':
-        if (typeof result !== 'string' || result.length > 2048 || !/^https?:/.test(result)) {
+        let url: string;
+        let type: string;
+
+        if (typeof result === 'string') {
+          url = result;
+          type = 'musicUrl';
+        } else if (typeof result === 'object' && result.url && typeof result.url === 'string') {
+          url = result.url;
+          type = result.type || 'musicUrl';
+        } else {
           console.warn('⚠️ 无效的音乐URL响应');
           return null;
         }
+
+        if (url.length > 2048 || !/^https?:/.test(url)) {
+          console.warn('⚠️ 无效的音乐URL');
+          return null;
+        }
+
         return {
           source: this.getCurrentSource(),
           action,
           data: {
-            type: 'musicUrl',
-            url: result,
+            type,
+            url,
           },
         };
 
@@ -648,7 +830,6 @@ export class Sandbox {
   async terminate(): Promise<void> {
     try {
       this.sourceHandlers.clear();
-      await this.lxGlobal.cleanup();
       this.isInitialized = false;
       console.log(`🔒 Sandbox 已终止: ${this.scriptInfo.name}`);
     } catch (error) {
