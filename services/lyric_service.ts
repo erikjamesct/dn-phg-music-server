@@ -357,21 +357,31 @@ class KugouLyricService {
     const enc_key = new Uint8Array([0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e, 0x69]);
 
     try {
+      // Base64 解码
       const buf_str = decodeBase64(content).slice(4);
       const decrypted = new Uint8Array(buf_str.length);
 
+      // XOR 解密
       for (let i = 0; i < buf_str.length; i++) {
         decrypted[i] = buf_str[i] ^ enc_key[i % 16];
       }
 
-      // 使用 pako inflateRaw 解压 (跳过 zlib 头部 78 9c)
+      // 使用 pako inflate 解压 (包含 zlib 头部)
       let result: Uint8Array;
 
       try {
-        result = inflateRaw(decrypted);
-      } catch (e) {
-        log.error("KRC解压缩失败，使用原始数据");
-        result = decrypted;
+        result = inflate(decrypted);
+        log.debug("KRC解压成功，解压后大小:", result.length);
+      } catch (e: any) {
+        log.error("KRC inflate 解压失败:", e.message);
+        // 尝试使用 inflateRaw (跳过 zlib 头部)
+        try {
+          result = inflateRaw(decrypted);
+          log.debug("KRC inflateRaw 解压成功，解压后大小:", result.length);
+        } catch (e2: any) {
+          log.error("KRC inflateRaw 解压也失败:", e2.message);
+          throw new Error("KRC解压失败: " + e.message);
+        }
       }
 
       const str = new TextDecoder().decode(result);
@@ -383,47 +393,80 @@ class KugouLyricService {
   }
 
   private parseKrc(str: string): LyricResult {
-    const lines = str.split("\n");
-    const lrcLines: string[] = [];
-    const lxlrcLines: string[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("[id:") || trimmed.startsWith("[ar:") || trimmed.startsWith("[ti:")) {
-        if (trimmed) lrcLines.push(trimmed);
-        continue;
-      }
-
-      // 匹配时间标签 [mm:ss.xxx]
-      const timeMatch = /^\[(\d{2}):(\d{2})\.(\d{2,3})\]/.exec(trimmed);
-      if (!timeMatch) {
-        lrcLines.push(trimmed);
-        lxlrcLines.push(trimmed);
-        continue;
-      }
-
-      // 解析逐字歌词格式: [mm:ss.xxx]<x,y>word<x,y>word
-      const content = trimmed.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, "");
-      const plainContent = content.replace(/<\d+,\d+>/g, "");
-      lrcLines.push(`[${timeMatch[1]}:${timeMatch[2]}.${timeMatch[3]}]${plainContent}`);
-
-      // 构建逐字歌词
-      const wordMatches = content.match(/<(\d+),(\d+)>([^<]*)/g);
-      if (wordMatches) {
-        const words = wordMatches.map(match => {
-          const m = /<(\d+),(\d+)>([^<]*)/.exec(match);
-          if (!m) return "";
-          return `<${m[1]},${m[2]}>${m[3]}`;
-        }).join("");
-        lxlrcLines.push(`[${timeMatch[1]}:${timeMatch[2]}.${timeMatch[3]}]${words}`);
-      } else {
-        lxlrcLines.push(`[${timeMatch[1]}:${timeMatch[2]}.${timeMatch[3]}]${content}`);
+    // 移除 \r
+    str = str.replace(/\r/g, '');
+    
+    // 移除头部 [id:$xxx]
+    const headExp = /^.*\[id:\$\w+\]\n/;
+    if (headExp.test(str)) str = str.replace(headExp, '');
+    
+    // 解析翻译歌词
+    let tlyric = '';
+    let rlyric = '';
+    const transMatch = str.match(/\[language:([\w=\\/+]+)\]/);
+    if (transMatch) {
+      str = str.replace(/\[language:[\w=\\/+]+\]\n/, '');
+      try {
+        const jsonStr = new TextDecoder().decode(decodeBase64(transMatch[1]));
+        const json = JSON.parse(jsonStr);
+        if (json.content) {
+          for (const item of json.content) {
+            if (item.type === 0) {
+              rlyric = item.lyricContent?.join('\n') || '';
+            } else if (item.type === 1) {
+              tlyric = item.lyricContent?.join('\n') || '';
+            }
+          }
+        }
+      } catch (e) {
+        log.error("解析翻译歌词失败:", e);
       }
     }
-
+    
+    // 解析逐字歌词
+    let i = 0;
+    let lxlyric = str.replace(/\[((\d+),\d+)\].*/g, (match) => {
+      const result = match.match(/\[((\d+),\d+)\].*/);
+      if (!result) return match;
+      
+      let time = parseInt(result[2]);
+      let ms = time % 1000;
+      time = Math.floor(time / 1000);
+      let m = Math.floor(time / 60).toString().padStart(2, '0');
+      let s = (time % 60).toString().padStart(2, '0');
+      const timeStr = `${m}:${s}.${ms}`;
+      
+      // 更新翻译和罗马音的时间标签
+      if (rlyric) {
+        const rlyricLines = rlyric.split('\n');
+        if (rlyricLines[i]) {
+          rlyricLines[i] = `[${timeStr}]${rlyricLines[i]}`;
+          rlyric = rlyricLines.join('\n');
+        }
+      }
+      if (tlyric) {
+        const tlyricLines = tlyric.split('\n');
+        if (tlyricLines[i]) {
+          tlyricLines[i] = `[${timeStr}]${tlyricLines[i]}`;
+          tlyric = tlyricLines.join('\n');
+        }
+      }
+      
+      i++;
+      return match.replace(result[1], timeStr);
+    });
+    
+    // 转换逐字标签格式 <x,y,0> -> <x,y>
+    lxlyric = lxlyric.replace(/<(\d+,\d+),\d+>/g, '<$1>');
+    
+    // 生成纯歌词（移除逐字标签）
+    const lyric = lxlyric.replace(/<\d+,\d+>/g, '');
+    
     return {
-      lyric: lrcLines.join("\n"),
-      lxlyric: lxlrcLines.join("\n"),
+      lyric,
+      tlyric,
+      rlyric,
+      lxlyric,
     };
   }
 }
