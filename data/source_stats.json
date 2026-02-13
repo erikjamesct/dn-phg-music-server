@@ -1,0 +1,24 @@
+{
+  "user_api_263_1770460539143": {
+    "kw": {
+      "success": 4,
+      "fail": 4
+    },
+    "mg": {
+      "success": 4,
+      "fail": 0
+    },
+    "tx": {
+      "success": 3,
+      "fail": 5
+    },
+    "kg": {
+      "success": 2,
+      "fail": 3
+    },
+    "wy": {
+      "success": 2,
+      "fail": 1
+    }
+  }
+}

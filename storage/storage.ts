@@ -628,8 +628,10 @@ export class ScriptStorage {
 
   private static MUSIC_URL_CACHE_KEY = ["music_url_cache"];
   private static CACHE_ENABLED_KEY = ["cache_enabled"];
+  private static SOURCE_STATS_KEY = ["source_stats"];
 
   private musicUrlCacheEnabled: boolean | null = null;
+  private sourceStatsCache: ScriptSourceStats | null = null;
 
   async isMusicUrlCacheEnabled(): Promise<boolean> {
     if (this.musicUrlCacheEnabled !== null) {
@@ -770,6 +772,112 @@ export class ScriptStorage {
       }
     }
   }
+
+  private static readonly ALL_SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg'] as const;
+  private static readonly MIN_SAMPLES = 5;
+  private static readonly EPSILON = 0.05;
+
+  async getSourceStats(): Promise<ScriptSourceStats> {
+    if (this.sourceStatsCache !== null) {
+      return this.sourceStatsCache;
+    }
+
+    if (this.kv) {
+      const result = await this.kv.get<ScriptSourceStats>(ScriptStorage.SOURCE_STATS_KEY);
+      if (result.value) {
+        this.sourceStatsCache = result.value;
+      } else {
+        this.sourceStatsCache = {};
+      }
+    } else {
+      try {
+        const data = await Deno.readTextFile(SOURCE_STATS_FILE);
+        this.sourceStatsCache = JSON.parse(data);
+      } catch {
+        this.sourceStatsCache = {};
+      }
+    }
+
+    return this.sourceStatsCache;
+  }
+
+  private async saveSourceStats(): Promise<void> {
+    if (!this.sourceStatsCache) return;
+
+    if (this.kv) {
+      await this.kv.set(ScriptStorage.SOURCE_STATS_KEY, this.sourceStatsCache);
+    } else {
+      try {
+        await Deno.writeTextFile(SOURCE_STATS_FILE, JSON.stringify(this.sourceStatsCache, null, 2));
+      } catch (error) {
+        console.error(`[Storage] Failed to save source stats: ${error}`);
+      }
+    }
+  }
+
+  async updateSourceStats(scriptId: string, source: string, success: boolean): Promise<void> {
+    const stats = await this.getSourceStats();
+
+    if (!stats[scriptId]) {
+      stats[scriptId] = {};
+    }
+    if (!stats[scriptId][source]) {
+      stats[scriptId][source] = { success: 0, fail: 0 };
+    }
+
+    if (success) {
+      stats[scriptId][source].success++;
+    } else {
+      stats[scriptId][source].fail++;
+    }
+
+    console.log(`[Storage] Updated stats for script ${scriptId}, source ${source}: success=${stats[scriptId][source].success}, fail=${stats[scriptId][source].fail}`);
+    await this.saveSourceStats();
+  }
+
+  private getSuccessRate(stats: SourceStats): number {
+    const total = stats.success + stats.fail;
+    if (total < ScriptStorage.MIN_SAMPLES) return -1;
+    return stats.success / total;
+  }
+
+  async getSortedSourcesBySuccessRate(scriptId: string, excludeSources: string[] = []): Promise<string[]> {
+    const stats = await this.getSourceStats();
+    const scriptStats = stats[scriptId] || {};
+
+    const sources = [...ScriptStorage.ALL_SOURCES].filter(s => !excludeSources.includes(s));
+
+    if (Math.random() < ScriptStorage.EPSILON) {
+      for (let i = sources.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [sources[i], sources[j]] = [sources[j], sources[i]];
+      }
+      console.log(`[Storage] ε-greedy random exploration: ${sources.join(', ')}`);
+      return sources;
+    }
+
+    return sources.sort((a, b) => {
+      const rateA = this.getSuccessRate(scriptStats[a] || { success: 0, fail: 0 });
+      const rateB = this.getSuccessRate(scriptStats[b] || { success: 0, fail: 0 });
+
+      if (rateA === -1 && rateB === -1) {
+        return Math.random() - 0.5;
+      }
+      if (rateA === -1) return 1;
+      if (rateB === -1) return -1;
+
+      if (Math.abs(rateA - rateB) < 0.01) {
+        return Math.random() - 0.5;
+      }
+
+      return rateB - rateA;
+    });
+  }
+
+  async getSourceStatsForScript(scriptId: string): Promise<{ [source: string]: SourceStats }> {
+    const stats = await this.getSourceStats();
+    return stats[scriptId] || {};
+  }
 }
 
 interface MusicUrlCacheEntry {
@@ -779,3 +887,16 @@ interface MusicUrlCacheEntry {
   songId: string;
   quality: string;
 }
+
+interface SourceStats {
+  success: number;
+  fail: number;
+}
+
+interface ScriptSourceStats {
+  [scriptId: string]: {
+    [source: string]: SourceStats;
+  };
+}
+
+const SOURCE_STATS_FILE = "./data/source_stats.json";
