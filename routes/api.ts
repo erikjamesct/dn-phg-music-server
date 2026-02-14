@@ -832,6 +832,9 @@ export class APIRoutes {
       const scriptId = defaultScriptId || 'unknown';
       const originalSource = body.source;
 
+      const lyricPromise = this.getLyricForMusicUrl(body, songId, name, singer, '', '');
+      lyricPromise.then(() => console.log('[API] 歌词获取完成')).catch(e => console.log('[API] 歌词获取失败:', e.message));
+
       const result = await this.tryGetMusicUrl(body, songId, name, singer);
       
       if (result.success && result.url) {
@@ -840,7 +843,7 @@ export class APIRoutes {
           await this.storage.updateSourceStats(scriptId, originalSource, false);
           
           if (allowToggleSource) {
-            return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId);
+            return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise);
           }
           
           return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("获取播放URL失败", 500, {
@@ -855,7 +858,21 @@ export class APIRoutes {
           console.log(`[API] 已缓存 URL, cacheKey: ${cacheKey}`);
         }
 
-        const lyricResult = await this.getLyricForMusicUrl(body, songId, name, singer, '', '');
+        let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
+        try {
+          const result = await Promise.race([
+            lyricPromise,
+            new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 3000))
+          ]);
+          lyricResult = {
+            lyric: result.lyric || '',
+            tlyric: result.tlyric || '',
+            rlyric: result.rlyric || '',
+            lxlyric: result.lxlyric || '',
+          };
+        } catch (e) {
+          console.log('[API] 歌词获取超时或失败，继续返回播放URL');
+        }
 
         const responseData = {
           url: result.url,
@@ -880,7 +897,7 @@ export class APIRoutes {
       await this.storage.updateSourceStats(scriptId, originalSource, false);
 
       if (allowToggleSource) {
-        return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId);
+        return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise);
       }
 
       console.error('[API] 获取播放URL失败:', result.message);
@@ -958,52 +975,93 @@ export class APIRoutes {
     singer: string,
     originalSource: string,
     excludeSources: string[],
-    scriptId: string
+    scriptId: string,
+    lyricPromise?: Promise<{lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string}>
   ): Promise<Response> {
     console.log(`[API] 开始换源流程，原始音源: ${originalSource}`);
-
-    const sortedSources = await this.storage.getSortedSourcesBySuccessRate(scriptId, [originalSource, ...excludeSources]);
-    console.log(`[API] 按成功率排序的音源列表: ${sortedSources.join(', ')}`);
 
     const keyword = `${name} ${singer}`.trim();
     console.log(`[API] 跨源搜索关键词: ${keyword}`);
 
-    for (const newSource of sortedSources) {
-      console.log(`[API] 尝试换源到: ${newSource}`);
+    const targetInterval = body.interval || body.musicInfo?.interval;
+    const targetAlbumName = body.albumName || body.musicInfo?.albumName || body.musicInfo?.album;
+
+    const allSources = ['kw', 'kg', 'tx', 'wy', 'mg'];
+    const sourcesToSearch = allSources.filter(s => s !== originalSource && !excludeSources.includes(s));
+    
+    console.log(`[API] 并行搜索音源: ${sourcesToSearch.join(', ')}`);
+
+    const searchPromises = sourcesToSearch.map(async (source) => {
+      try {
+        const searchResults = await this.searchService.search(keyword, source, 1, 10);
+        const searchResult = searchResults.find(r => r.platform === source);
+        return { source, searchResult };
+      } catch (error: any) {
+        console.log(`[API] ${source} 搜索失败: ${error.message}`);
+        return { source, searchResult: null };
+      }
+    });
+
+    const searchResultsArray = await Promise.all(searchPromises);
+
+    const matchedSongs: any[] = [];
+    for (const { source, searchResult } of searchResultsArray) {
+      if (!searchResult || searchResult.results.length === 0) {
+        console.log(`[API] ${source} 搜索结果为空`);
+        continue;
+      }
+
+      const matchedSong = this.findBestMatch(searchResult.results, name, singer, targetInterval, targetAlbumName);
+      if (matchedSong) {
+        matchedSongs.push({
+          ...matchedSong,
+          source,
+          matchScore: matchedSong.matchScore || 0,
+        });
+        console.log(`[API] ${source} 找到匹配歌曲: ${matchedSong.name} - ${matchedSong.singer} (匹配度: ${matchedSong.matchScore || 0})`);
+      } else {
+        console.log(`[API] ${source} 未找到匹配歌曲`);
+      }
+    }
+
+    if (matchedSongs.length === 0) {
+      console.log('[API] 所有音源均未找到匹配歌曲');
+      return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("未找到匹配歌曲", 404, {
+        source: originalSource,
+      }));
+    }
+
+    const sourceStats = await this.storage.getSourceStatsForScript(scriptId);
+    const sortedSongs = this.sortByMatchAndSuccessRate(matchedSongs, sourceStats);
+    
+    console.log(`[API] 综合排序后的歌曲列表:`);
+    sortedSongs.forEach((song: any, index: number) => {
+      const stats = sourceStats[song.source];
+      const rate = stats ? ((stats.success / (stats.success + stats.fail)) * 100).toFixed(1) : '0.0';
+      console.log(`[API]   ${index + 1}. ${song.source}: ${song.name} - ${song.singer} (匹配度: ${song.matchScore?.toFixed(2) || 0}, 成功率: ${rate}%)`);
+    });
+
+    for (const song of sortedSongs) {
+      const newSource = song.source;
+      console.log(`[API] 尝试从 ${newSource} 获取播放URL`);
 
       try {
-        const searchResults = await this.searchService.search(keyword, newSource, 1, 5);
-        const searchResult = searchResults.find(r => r.platform === newSource);
-
-        if (!searchResult || searchResult.results.length === 0) {
-          console.log(`[API] ${newSource} 搜索结果为空，跳过`);
-          continue;
-        }
-
-        const matchedSong = this.findBestMatch(searchResult.results, name, singer);
-        if (!matchedSong) {
-          console.log(`[API] ${newSource} 未找到匹配歌曲，跳过`);
-          continue;
-        }
-
-        console.log(`[API] ${newSource} 找到匹配歌曲: ${matchedSong.name} - ${matchedSong.singer}`);
-
         const newBody = {
           ...body,
           source: newSource,
           musicInfo: {
             ...body.musicInfo,
-            ...matchedSong.musicInfo,
+            ...song.musicInfo,
             source: newSource,
           },
         };
 
-        const newSongId = matchedSong.musicInfo?.songmid || matchedSong.musicInfo?.id || matchedSong.id || matchedSong.hash;
-        const result = await this.tryGetMusicUrl(newBody, newSongId, matchedSong.name, matchedSong.singer);
+        const newSongId = song.musicInfo?.songmid || song.musicInfo?.id || song.id || song.hash;
+        const result = await this.tryGetMusicUrl(newBody, newSongId, song.name, song.singer);
 
         if (result.success && result.url) {
           if (result.url.endsWith('2149972737147268278.mp3')) {
-            console.log(`[API] ${newSource} 返回无效URL，继续尝试下一个音源`);
+            console.log(`[API] ${newSource} 返回无效URL，继续尝试下一个`);
             await this.storage.updateSourceStats(scriptId, newSource, false);
             continue;
           }
@@ -1011,7 +1069,63 @@ export class APIRoutes {
           await this.storage.updateSourceStats(scriptId, newSource, true);
           console.log(`[API] 换源成功: ${originalSource} -> ${newSource}`);
 
-          const lyricResult = await this.getLyricForMusicUrl(newBody, newSongId, matchedSong.name, matchedSong.singer, '', '');
+          let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
+          
+          if (lyricPromise) {
+            try {
+              const result = await Promise.race([
+                lyricPromise,
+                new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 2000))
+              ]);
+              lyricResult = {
+                lyric: result.lyric || '',
+                tlyric: result.tlyric || '',
+                rlyric: result.rlyric || '',
+                lxlyric: result.lxlyric || '',
+              };
+            } catch (e) {
+              console.log('[API] 原始歌词获取失败，尝试获取新音源歌词');
+            }
+          }
+          
+          if (!lyricResult.lyric) {
+            try {
+              let lyricSongId = '';
+              let lyricHash = '';
+              let lyricCopyrightId = '';
+              
+              switch (newSource) {
+                case 'kw':
+                  lyricSongId = song.musicInfo?.songmid || song.id || '';
+                  break;
+                case 'kg':
+                  lyricHash = song.musicInfo?.hash || song.hash || '';
+                  break;
+                case 'tx':
+                  lyricSongId = song.musicInfo?.songmid || song.musicInfo?.songId || song.id || '';
+                  break;
+                case 'wy':
+                  lyricSongId = song.musicInfo?.songId || song.musicInfo?.id || song.id || '';
+                  break;
+                case 'mg':
+                  lyricCopyrightId = song.musicInfo?.copyrightId || song.id || '';
+                  break;
+              }
+              
+              const newLyricResult = await Promise.race([
+                this.getLyricForMusicUrl(newBody, lyricSongId, song.name, song.singer, lyricHash, lyricCopyrightId),
+                new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 3000))
+              ]);
+              lyricResult = {
+                lyric: newLyricResult.lyric || '',
+                tlyric: newLyricResult.tlyric || '',
+                rlyric: newLyricResult.rlyric || '',
+                lxlyric: newLyricResult.lxlyric || '',
+              };
+            } catch (e) {
+              console.log('[API] 新音源歌词获取失败');
+            }
+          }
 
           const responseData = {
             url: result.url,
@@ -1028,8 +1142,8 @@ export class APIRoutes {
               originalSource: originalSource,
               newSource: newSource,
               matchedSong: {
-                name: matchedSong.name,
-                singer: matchedSong.singer,
+                name: song.name,
+                singer: song.singer,
               },
             },
           };
@@ -1039,7 +1153,7 @@ export class APIRoutes {
         }
 
         await this.storage.updateSourceStats(scriptId, newSource, false);
-        console.log(`[API] ${newSource} 获取URL失败，继续尝试下一个音源`);
+        console.log(`[API] ${newSource} 获取URL失败，继续尝试下一个`);
       } catch (error: any) {
         console.error(`[API] ${newSource} 换源异常:`, error.message);
         await this.storage.updateSourceStats(scriptId, newSource, false);
@@ -1050,30 +1164,127 @@ export class APIRoutes {
     console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
     return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("所有音源均获取失败", 500, {
       source: originalSource,
-      triedSources: sortedSources,
+      triedSources: sortedSongs.map((s: any) => s.source),
     }));
   }
 
-  private findBestMatch(results: any[], targetName: string, targetSinger: string): any | null {
+  private sortByMatchAndSuccessRate(songs: any[], sourceStats: { [source: string]: { success: number; fail: number } }): any[] {
+    const getSuccessRate = (source: string): number => {
+      const stats = sourceStats[source];
+      if (!stats) return 0.5;
+      const total = stats.success + stats.fail;
+      if (total === 0) return 0.5;
+      return stats.success / total;
+    };
+
+    return songs.sort((a, b) => {
+      const matchScoreA = a.matchScore || 0;
+      const matchScoreB = b.matchScore || 0;
+      const successRateA = getSuccessRate(a.source);
+      const successRateB = getSuccessRate(b.source);
+
+      const totalScoreA = matchScoreA * 0.7 + successRateA * 0.3;
+      const totalScoreB = matchScoreB * 0.7 + successRateB * 0.3;
+
+      return totalScoreB - totalScoreA;
+    });
+  }
+
+  private findBestMatch(results: any[], targetName: string, targetSinger: string, targetInterval?: string, targetAlbumName?: string): any | null {
     if (results.length === 0) return null;
 
-    const normalize = (str: string) => str.toLowerCase().replace(/\s+/g, '').replace(/[^\w\u4e00-\u9fa5]/g, '');
-    const normalizedName = normalize(targetName);
-    const normalizedSinger = normalize(targetSinger);
-
-    for (const result of results) {
-      const resultName = normalize(result.name || '');
-      const resultSinger = normalize(result.singer || '');
-
-      if (resultName === normalizedName && resultSinger.includes(normalizedSinger)) {
-        return result;
+    const singersRxp = /、|&|;|；|\/|,|，|\|/;
+    const sortSingle = (singer: string) => singersRxp.test(singer)
+      ? singer.split(singersRxp).sort((a, b) => a.localeCompare(b)).join('、')
+      : (singer || '');
+    
+    const trimStr = (str: string) => typeof str === 'string' ? str.trim() : (str || '');
+    const filterStr = (str: string) => typeof str === 'string' 
+      ? str.replace(/\s|'|\.|,|，|&|"|、|\(|\)|（|）|`|~|-|<|>|\||\/|\]|\[|!|！/g, '').toLowerCase() 
+      : String(str || '').toLowerCase();
+    
+    const getIntv = (interval: string | number | undefined): number => {
+      if (!interval) return 0;
+      if (typeof interval === 'number') return interval;
+      if (typeof interval !== 'string') return 0;
+      const intvArr = interval.split(':');
+      let intv = 0;
+      let unit = 1;
+      while (intvArr.length) {
+        intv += parseInt(intvArr.pop() || '0') * unit;
+        unit *= 60;
       }
-      if (resultName.includes(normalizedName) || normalizedName.includes(resultName)) {
-        return result;
+      return intv;
+    };
+
+    const fMusicName = filterStr(targetName);
+    const fSinger = filterStr(sortSingle(targetSinger));
+    const fAlbumName = filterStr(targetAlbumName || '');
+    const fInterval = getIntv(targetInterval);
+
+    const isEqualsInterval = (intv: number) => Math.abs((fInterval || intv) - (intv || fInterval)) < 5;
+    const isIncludesName = (name: string) => (fMusicName.includes(name) || name.includes(fMusicName));
+    const isIncludesSinger = (singer: string) => fSinger ? (fSinger.includes(singer) || singer.includes(fSinger)) : true;
+    const isEqualsAlbum = (album: string) => fAlbumName ? fAlbumName === album : true;
+
+    const calculateMatchScore = (item: any): number => {
+      let score = 0;
+      
+      if (item.fMusicName === fMusicName) {
+        score += 0.4;
+      } else if (isIncludesName(item.fMusicName)) {
+        score += 0.2;
       }
+      
+      if (item.fSinger === fSinger) {
+        score += 0.3;
+      } else if (isIncludesSinger(item.fSinger)) {
+        score += 0.15;
+      }
+      
+      if (isEqualsInterval(item.fInterval)) {
+        score += 0.2;
+      }
+      
+      if (fAlbumName && item.fAlbumName === fAlbumName) {
+        score += 0.1;
+      }
+      
+      return score;
+    };
+
+    const processedResults = results.map(item => {
+      const resultName = trimStr(item.name || '');
+      const resultSinger = trimStr(item.singer || '');
+      const processed = {
+        ...item,
+        name: resultName,
+        singer: resultSinger,
+        fSinger: filterStr(sortSingle(resultSinger)),
+        fMusicName: filterStr(resultName),
+        fAlbumName: filterStr(item.albumName || ''),
+        fInterval: getIntv(item.interval),
+      };
+      return {
+        ...processed,
+        matchScore: calculateMatchScore(processed),
+      };
+    });
+
+    const validResults = processedResults.filter(item => isEqualsInterval(item.fInterval));
+    
+    if (validResults.length === 0) {
+      const fallbackResults = processedResults.filter(item => item.matchScore > 0.3);
+      if (fallbackResults.length > 0) {
+        fallbackResults.sort((a, b) => b.matchScore - a.matchScore);
+        return fallbackResults[0];
+      }
+      return null;
     }
 
-    return results[0];
+    validResults.sort((a, b) => b.matchScore - a.matchScore);
+
+    return validResults[0];
   }
 
   // 辅助方法：为音乐URL接口获取歌词
