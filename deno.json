@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./main.ts",
   "nodeModulesDir": "auto",
+  "runtime": "deno",
   "scripts": {
     "start": "deno run --allow-all --watch main.ts",
     "dev": "deno run --allow-all --watch main.ts",

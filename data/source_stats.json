@@ -393,16 +393,16 @@
       "fail": 247
     },
     "tx": {
-      "success": 1055,
-      "fail": 149
+      "success": 1056,
+      "fail": 150
     },
     "mg": {
-      "success": 207,
+      "success": 208,
       "fail": 110
     },
     "wy": {
       "success": 99,
-      "fail": 257
+      "fail": 258
     }
   }
 }
