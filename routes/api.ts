@@ -13,6 +13,33 @@ interface ApiResponse<T = any> {
   data: T | null;
 }
 
+const REQUEST_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+  abortController?: AbortController
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      if (abortController) {
+        abortController.abort();
+      }
+      reject(new Error(`请求超时 (${timeoutMs}ms)`));
+    }, timeoutMs);
+
+    promise
+      .then((result) => {
+        clearTimeout(timeoutId);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
 class ApiResponseBuilder {
   static success<T>(data: T, msg: string = "success"): ApiResponse<T> {
     return {
@@ -49,6 +76,14 @@ class ApiResponseBuilder {
   static serverError(msg: string = "internal server error"): ApiResponse<null> {
     return {
       code: 500,
+      msg,
+      data: null,
+    };
+  }
+
+  static timeout(msg: string = "请求超时"): ApiResponse<null> {
+    return {
+      code: 504,
       msg,
       data: null,
     };
@@ -112,26 +147,130 @@ export class APIRoutes {
     router.get("/", () => this.handleIndex());
     router.get("/api/status", (ctx) => this.handleStatus(ctx));
 
-    router.post(`${prefix}/api/scripts`, (ctx) => this.handleImportScript(ctx));
-    router.get(`${prefix}/api/scripts/loaded`, (ctx) => this.handleGetLoadedScripts(ctx));
-    router.post(`${prefix}/api/scripts/delete`, (ctx) => this.handleRemoveScript(ctx));
+    router.post(`${prefix}/api/scripts`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleImportScript(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.get(`${prefix}/api/scripts/loaded`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleGetLoadedScripts(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.post(`${prefix}/api/scripts/delete`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleRemoveScript(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
-    router.post(`${prefix}/api/scripts/import/url`, (ctx) => this.handleImportScriptFromUrl(ctx));
-    router.post(`${prefix}/api/scripts/import/file`, (ctx) => this.handleImportScriptFromFile(ctx));
+    router.post(`${prefix}/api/scripts/import/url`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleImportScriptFromUrl(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.post(`${prefix}/api/scripts/import/file`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleImportScriptFromFile(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
-    router.post(`${prefix}/api/scripts/default`, (ctx) => this.handleSetDefaultSource(ctx));
-    router.get(`${prefix}/api/scripts/default`, (ctx) => this.handleGetDefaultSource(ctx));
+    router.post(`${prefix}/api/scripts/default`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleSetDefaultSource(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.get(`${prefix}/api/scripts/default`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleGetDefaultSource(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
-    router.post(`${prefix}/api/cache/music-url/enable`, (ctx) => this.handleSetMusicUrlCacheEnabled(ctx));
-    router.get(`${prefix}/api/cache/music-url/status`, (ctx) => this.handleGetMusicUrlCacheStatus(ctx));
-    router.post(`${prefix}/api/cache/music-url/clear`, (ctx) => this.handleClearMusicUrlCache(ctx));
+    router.post(`${prefix}/api/cache/music-url/enable`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleSetMusicUrlCacheEnabled(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.get(`${prefix}/api/cache/music-url/status`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleGetMusicUrlCacheStatus(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.post(`${prefix}/api/cache/music-url/clear`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleClearMusicUrlCache(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
     router.post(`${prefix}/api/music/url`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/music/url 请求 ==========');
       const startTime = Date.now();
-      let response: Response;
+      const abortController = new AbortController();
       try {
-        response = await this.handleGetMusicUrl(ctx);
+        const response = await withTimeout(
+          this.handleGetMusicUrl(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/music/url 调用完成，耗时:', duration, 'ms');
         console.log('[API] 返回状态:', response.status);
@@ -145,17 +284,25 @@ export class APIRoutes {
         console.log('========== [API] /api/music/url 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/music/url 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/music/url 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/music/url 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
     router.post(`${prefix}/api/music/lyric`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/music/lyric 请求 ==========');
       const startTime = Date.now();
+      const abortController = new AbortController();
       try {
-        const response = await this.handleGetLyricDirect(ctx);
+        const response = await withTimeout(
+          this.handleGetLyricDirect(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/music/lyric 调用完成，耗时:', duration, 'ms');
         console.log('[API] 返回状态:', response.status);
@@ -164,18 +311,25 @@ export class APIRoutes {
         console.log('========== [API] /api/music/lyric 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/music/lyric 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/music/lyric 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/music/lyric 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
     router.post(`${prefix}/api/music/pic`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/music/pic 请求 ==========');
       const startTime = Date.now();
-      let response: Response;
+      const abortController = new AbortController();
       try {
-        response = await this.handleGetPic(ctx);
+        const response = await withTimeout(
+          this.handleGetPic(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/music/pic 调用完成，耗时:', duration, 'ms');
         console.log('[API] 返回状态:', response.status);
@@ -184,31 +338,72 @@ export class APIRoutes {
         console.log('========== [API] /api/music/pic 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/music/pic 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/music/pic 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/music/pic 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
 
-    router.get(`${prefix}/api/search`, (ctx) => this.handleSearch(ctx));
+    router.get(`${prefix}/api/search`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleSearch(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
-    router.post(`${prefix}/api/request`, (ctx) => this.handleRequest(ctx));
-    router.delete(`${prefix}/api/request/:requestKey`, (ctx) => this.handleCancelRequest(ctx));
+    router.post(`${prefix}/api/request`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleRequest(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
+    router.delete(`${prefix}/api/request/:requestKey`, async (ctx) => {
+      const abortController = new AbortController();
+      try {
+        return await withTimeout(this.handleCancelRequest(ctx, abortController.signal), REQUEST_TIMEOUT_MS, abortController);
+      } catch (error: any) {
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
+      }
+    });
 
     router.post(`${prefix}/api/music/lyric/direct`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/music/lyric/direct 请求 ==========');
       const startTime = Date.now();
+      const abortController = new AbortController();
       try {
-        const response = await this.handleGetLyricDirect(ctx);
+        const response = await withTimeout(
+          this.handleGetLyricDirect(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/music/lyric/direct 调用完成，耗时:', duration, 'ms');
         console.log('========== [API] /api/music/lyric/direct 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/music/lyric/direct 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/music/lyric/direct 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/music/lyric/direct 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
@@ -216,16 +411,24 @@ export class APIRoutes {
     router.post(`${prefix}/api/songlist/detail`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/songlist/detail 请求 ==========');
       const startTime = Date.now();
+      const abortController = new AbortController();
       try {
-        const response = await this.handleGetSongListDetail(ctx);
+        const response = await withTimeout(
+          this.handleGetSongListDetail(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/songlist/detail 调用完成，耗时:', duration, 'ms');
         console.log('========== [API] /api/songlist/detail 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/songlist/detail 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/songlist/detail 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/songlist/detail 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
@@ -233,16 +436,24 @@ export class APIRoutes {
     router.post(`${prefix}/api/songlist/detail/by-link`, async (ctx) => {
       console.log('\n========== [API] 收到 /api/songlist/detail/by-link 请求 ==========');
       const startTime = Date.now();
+      const abortController = new AbortController();
       try {
-        const response = await this.handleGetSongListDetailByLink(ctx);
+        const response = await withTimeout(
+          this.handleGetSongListDetailByLink(ctx, abortController.signal),
+          REQUEST_TIMEOUT_MS,
+          abortController
+        );
         const duration = Date.now() - startTime;
         console.log('[API] /api/songlist/detail/by-link 调用完成，耗时:', duration, 'ms');
         console.log('========== [API] /api/songlist/detail/by-link 请求结束 ==========\n');
         return response;
       } catch (error: any) {
-        console.error('[API] /api/songlist/detail/by-link 抛出异常:', error.message);
-        console.error('[API] 异常堆栈:', error.stack);
+        const duration = Date.now() - startTime;
+        console.error('[API] /api/songlist/detail/by-link 抛出异常:', error.message, `(${duration}ms)`);
         console.log('========== [API] /api/songlist/detail/by-link 请求异常结束 ==========\n');
+        if (error.message.includes('超时')) {
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
+        }
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message || "Internal Server Error"), 500);
       }
     });
@@ -358,7 +569,8 @@ export class APIRoutes {
     }));
   }
 
-  private async handleGetLoadedScripts(_ctx: any): Promise<Response> {
+  private async handleGetLoadedScripts(_ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const scripts = this.storage.getLoadedScripts();
       return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(scripts));
@@ -367,7 +579,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleImportScript(ctx: any): Promise<Response> {
+  private async handleImportScript(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       let body;
       const contentType = ctx.req.headers.get("content-type") || "";
@@ -401,7 +614,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleImportScriptFromUrl(ctx: any): Promise<Response> {
+  private async handleImportScriptFromUrl(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const body = await ctx.req.json();
       
@@ -429,7 +643,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleImportScriptFromFile(ctx: any): Promise<Response> {
+  private async handleImportScriptFromFile(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const contentType = ctx.req.headers.get("content-type") || "";
       let body: any = {};
@@ -467,7 +682,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleRemoveScript(ctx: any): Promise<Response> {
+  private async handleRemoveScript(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const body = await ctx.req.json();
       const { id } = body;
@@ -499,7 +715,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleSetDefaultSource(ctx: any): Promise<Response> {
+  private async handleSetDefaultSource(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const body = await ctx.req.json();
       const { id } = body;
@@ -533,7 +750,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleGetDefaultSource(_ctx: any): Promise<Response> {
+  private async handleGetDefaultSource(_ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const defaultInfo = this.storage.getDefaultSourceInfo();
       const loadedScripts = this.storage.getLoadedScripts();
@@ -550,7 +768,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleSetMusicUrlCacheEnabled(ctx: any): Promise<Response> {
+  private async handleSetMusicUrlCacheEnabled(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const body = await ctx.req.json();
       const enabled = body.enabled === 1 || body.enabled === true;
@@ -568,7 +787,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleGetMusicUrlCacheStatus(_ctx: any): Promise<Response> {
+  private async handleGetMusicUrlCacheStatus(_ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const isEnabled = await this.storage.isMusicUrlCacheEnabled();
       const cacheCount = await this.storage.getMusicUrlCacheCount();
@@ -582,7 +802,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleClearMusicUrlCache(_ctx: any): Promise<Response> {
+  private async handleClearMusicUrlCache(_ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       await this.storage.clearMusicUrlCache();
 
@@ -594,8 +815,12 @@ export class APIRoutes {
     }
   }
 
-  private async handleGetMusicUrl(ctx: any): Promise<Response> {
+  private async handleGetMusicUrl(ctx: any, signal?: AbortSignal): Promise<Response> {
     console.log('\n========== [API] handleGetMusicUrl 开始 ==========');
+
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
 
     try {
       const body = await ctx.req.json();
@@ -667,7 +892,7 @@ export class APIRoutes {
           await this.storage.updateSourceStats(scriptId, originalSource, false);
           
           if (allowToggleSource) {
-            return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise);
+            return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise, signal);
           }
           
           return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("获取播放URL失败", 500, {
@@ -721,7 +946,7 @@ export class APIRoutes {
       await this.storage.updateSourceStats(scriptId, originalSource, false);
 
       if (allowToggleSource) {
-        return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise);
+        return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise, signal);
       }
 
       console.error('[API] 获取播放URL失败:', result.message);
@@ -800,9 +1025,14 @@ export class APIRoutes {
     originalSource: string,
     excludeSources: string[],
     scriptId: string,
-    lyricPromise?: Promise<{lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string}>
+    lyricPromise?: Promise<{lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string}>,
+    signal?: AbortSignal
   ): Promise<Response> {
     console.log(`[API] 开始换源流程，原始音源: ${originalSource}`);
+
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
 
     const keyword = `${name} ${singer}`.trim();
     console.log(`[API] 跨源搜索关键词: ${keyword}`);
@@ -816,6 +1046,9 @@ export class APIRoutes {
     console.log(`[API] 并行搜索音源: ${sourcesToSearch.join(', ')}`);
 
     const searchPromises = sourcesToSearch.map(async (source) => {
+      if (signal?.aborted) {
+        return { source, searchResult: null };
+      }
       try {
         const searchResults = await this.searchService.search(keyword, source, 1, 10);
         const searchResult = searchResults.find(r => r.platform === source);
@@ -827,6 +1060,10 @@ export class APIRoutes {
     });
 
     const searchResultsArray = await Promise.all(searchPromises);
+
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
 
     const matchedSongs: any[] = [];
     for (const { source, searchResult } of searchResultsArray) {
@@ -866,6 +1103,10 @@ export class APIRoutes {
     });
 
     for (const song of sortedSongs) {
+      if (signal?.aborted) {
+        throw new Error('请求已被取消');
+      }
+
       const newSource = song.source;
       console.log(`[API] 尝试从 ${newSource} 获取播放URL`);
 
@@ -1224,17 +1465,18 @@ export class APIRoutes {
 
 
 
-  // 新增：直接调用平台API获取歌词（统一参数接口）
-  // 统一参数：source, songId, name, singer
-  private async handleGetLyricDirect(ctx: any): Promise<Response> {
+  private async handleGetLyricDirect(ctx: any, signal?: AbortSignal): Promise<Response> {
     console.log('\n========== [API] handleGetLyricDirect 开始 ==========');
     console.log('[API] 请求时间:', new Date().toISOString());
     
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
     try {
       const body = await ctx.req.json();
       console.log('[API] 请求参数:', JSON.stringify(body, null, 2));
 
-      // 验证必要参数
       if (!body.source) {
         console.error('[API] 缺少source参数');
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("缺少必要参数: source", 400));
@@ -1242,7 +1484,6 @@ export class APIRoutes {
 
       const source = body.source;
       
-      // 统一参数：只接受 songId
       const songId = body.songId;
       
       if (!songId) {
@@ -1250,7 +1491,6 @@ export class APIRoutes {
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("缺少必要参数: songId", 400));
       }
 
-      // 统一参数名
       const name = body.name || '';
       const singer = body.singer || '';
 
@@ -1314,15 +1554,17 @@ export class APIRoutes {
     }
   }
 
-  // 处理歌单详情请求
-  private async handleGetSongListDetail(ctx: any): Promise<Response> {
+  private async handleGetSongListDetail(ctx: any, signal?: AbortSignal): Promise<Response> {
     console.log('\n========== [API] handleGetSongListDetail 开始 ==========');
     
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
     try {
       const body = await ctx.req.json();
       console.log('[API] 请求参数:', JSON.stringify(body, null, 2));
 
-      // 验证必要参数
       if (!body.source) {
         console.error('[API] 缺少source参数');
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("缺少必要参数: source", 400));
@@ -1336,7 +1578,6 @@ export class APIRoutes {
       const source = body.source;
       const id = body.id;
 
-      // 验证音源
       const validSources = ['wy', 'tx', 'kg', 'kw', 'mg'];
       if (!validSources.includes(source)) {
         console.error('[API] 不支持的音源:', source);
@@ -1372,29 +1613,29 @@ export class APIRoutes {
     }
   }
 
-  // 处理短链接歌单详情请求
-  private async handleGetSongListDetailByLink(ctx: any): Promise<Response> {
+  private async handleGetSongListDetailByLink(ctx: any, signal?: AbortSignal): Promise<Response> {
     console.log('\n========== [API] handleGetSongListDetailByLink 开始 ==========');
     
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
     try {
       const body = await ctx.req.json();
       console.log('[API] 请求参数:', JSON.stringify(body, null, 2));
 
-      // 验证必要参数
       if (!body.link) {
         console.error('[API] 缺少link参数');
         return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("缺少必要参数: link (歌单链接)", 400));
       }
 
       const link = body.link;
-      // 可选参数：客户端可以指定平台，如果不指定则自动识别
       const specifiedSource = body.source;
 
       let source: string;
       let id: string;
 
       if (specifiedSource) {
-        // 客户端指定了平台，直接使用
         console.log('[API] 客户端指定了平台:', specifiedSource);
         source = specifiedSource;
         
@@ -1447,7 +1688,11 @@ export class APIRoutes {
     }
   }
 
-  private async handleGetPic(ctx: any): Promise<Response> {
+  private async handleGetPic(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
     try {
       const body = await ctx.req.json();
 
@@ -1486,7 +1731,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleSearch(ctx: any): Promise<Response> {
+  private async handleSearch(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const url = new URL(ctx.req.url, `http://${ctx.req.headers.get('host')}`);
       const keyword = url.searchParams.get('keyword');
@@ -1511,7 +1757,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleRequest(ctx: any): Promise<Response> {
+  private async handleRequest(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const body = await ctx.req.json();
 
@@ -1527,7 +1774,8 @@ export class APIRoutes {
     }
   }
 
-  private async handleCancelRequest(ctx: any): Promise<Response> {
+  private async handleCancelRequest(ctx: any, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const { requestKey } = ctx.params;
       this.handler.cancelRequest(requestKey);
