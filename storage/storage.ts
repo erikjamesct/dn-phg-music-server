@@ -172,9 +172,13 @@ export class ScriptStorage {
             
             // 分块存储新内容
             const scriptContent = item.script;
+            const totalChunks = Math.ceil(scriptContent.length / CHUNK_SIZE);
+            console.log(`[Storage] Script ${item.id} length: ${scriptContent.length}, chunks: ${totalChunks}`);
+            
             for (let i = 0; i < scriptContent.length; i += CHUNK_SIZE) {
               const chunk = scriptContent.slice(i, i + CHUNK_SIZE);
               const idx = Math.floor(i / CHUNK_SIZE);
+              console.log(`[Storage] Storing chunk ${idx}, size: ${chunk.length}`);
               await this.kv.set([SCRIPT_CONTENT_PREFIX, item.id, idx], chunk);
             }
           }
