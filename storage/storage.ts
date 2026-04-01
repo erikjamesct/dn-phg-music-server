@@ -155,10 +155,6 @@ export class ScriptStorage {
   private async saveToStorage(): Promise<void> {
     try {
       const items = Array.from(this.scripts.values());
-      const data: StorageData = {
-        scripts: items,
-        defaultSourceId: this.defaultSourceId,
-      };
       
       // Deno Deploy 环境使用 KV
       if (isDenoDeploy && this.kv) {
@@ -186,16 +182,35 @@ export class ScriptStorage {
         
         // 存储元数据（不包含 script 内容）
         const metadataOnly = items.map(item => ({
-          ...item,
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          author: item.author,
+          homepage: item.homepage,
+          version: item.version,
           script: '',
+          allowShowUpdateAlert: item.allowShowUpdateAlert,
+          isDefault: item.isDefault,
+          supportedSources: item.supportedSources,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
         }));
         
-        await this.kv.set([STORAGE_KEY], { ...data, scripts: metadataOnly });
+        const metadata: StorageData = {
+          scripts: metadataOnly,
+          defaultSourceId: this.defaultSourceId,
+        };
+        
+        await this.kv.set([STORAGE_KEY], metadata);
         console.log("[Storage] Saved to KV (scripts stored in chunks)");
         return;
       }
 
       // 本地环境使用文件
+      const data: StorageData = {
+        scripts: items,
+        defaultSourceId: this.defaultSourceId,
+      };
       const jsonData = JSON.stringify(data, null, 2);
       await Deno.writeTextFile(STORAGE_FILE, jsonData);
     } catch (error) {
