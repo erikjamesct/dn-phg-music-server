@@ -649,9 +649,13 @@ export class ScriptStorage {
   private static MUSIC_URL_CACHE_KEY = ["music_url_cache"];
   private static CACHE_ENABLED_KEY = ["cache_enabled"];
   private static SOURCE_STATS_KEY = ["source_stats"];
+  private static SCRIPT_STATS_KEY = ["script_stats"];
+  private static CIRCUIT_BREAKER_KEY = ["circuit_breaker"];
 
   private musicUrlCacheEnabled: boolean | null = null;
   private sourceStatsCache: ScriptSourceStats | null = null;
+  private scriptStatsCache: ScriptStatsData | null = null;
+  private circuitBreakerCache: CircuitBreakerData | null = null;
 
   async isMusicUrlCacheEnabled(): Promise<boolean> {
     if (this.musicUrlCacheEnabled !== null) {
@@ -899,6 +903,202 @@ export class ScriptStorage {
     return stats[scriptId] || {};
   }
 
+  private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
+  private static readonly CIRCUIT_BREAKER_RESET_TIME = 2 * 60 * 60 * 1000;
+
+  async getScriptStats(): Promise<ScriptStatsData> {
+    if (this.scriptStatsCache !== null) {
+      return this.scriptStatsCache;
+    }
+
+    if (this.kv) {
+      const result = await this.kv.get<ScriptStatsData>(ScriptStorage.SCRIPT_STATS_KEY);
+      if (result.value) {
+        this.scriptStatsCache = result.value;
+      } else {
+        this.scriptStatsCache = {};
+      }
+    } else {
+      try {
+        const data = await Deno.readTextFile('./data/script_stats.json');
+        this.scriptStatsCache = JSON.parse(data);
+      } catch {
+        this.scriptStatsCache = {};
+      }
+    }
+
+    return this.scriptStatsCache;
+  }
+
+  private async saveScriptStats(): Promise<void> {
+    if (!this.scriptStatsCache) return;
+
+    if (this.kv) {
+      await this.kv.set(ScriptStorage.SCRIPT_STATS_KEY, this.scriptStatsCache);
+    } else {
+      try {
+        await Deno.writeTextFile('./data/script_stats.json', JSON.stringify(this.scriptStatsCache, null, 2));
+      } catch (error) {
+        console.error(`[Storage] Failed to save script stats: ${error}`);
+      }
+    }
+  }
+
+  async updateScriptStats(scriptId: string, success: boolean, responseTime: number = 0): Promise<void> {
+    const stats = await this.getScriptStats();
+
+    if (!stats[scriptId]) {
+      stats[scriptId] = {
+        success: 0,
+        fail: 0,
+        lastSuccessAt: 0,
+        lastFailAt: 0,
+        avgResponseTime: 0,
+        totalRequests: 0,
+      };
+    }
+
+    const scriptStat = stats[scriptId];
+    scriptStat.totalRequests++;
+
+    if (success) {
+      scriptStat.success++;
+      scriptStat.lastSuccessAt = Date.now();
+      if (responseTime > 0) {
+        scriptStat.avgResponseTime = (scriptStat.avgResponseTime * (scriptStat.success - 1) + responseTime) / scriptStat.success;
+      }
+    } else {
+      scriptStat.fail++;
+      scriptStat.lastFailAt = Date.now();
+    }
+
+    console.log(`[Storage] Updated script stats for ${scriptId}: success=${scriptStat.success}, fail=${scriptStat.fail}, avgTime=${scriptStat.avgResponseTime.toFixed(0)}ms`);
+    await this.saveScriptStats();
+  }
+
+  getScriptSuccessRate(stats: ScriptStats): number {
+    const total = stats.success + stats.fail;
+    if (total === 0) return 0.5;
+    return stats.success / total;
+  }
+
+  async getCircuitBreakerState(): Promise<CircuitBreakerData> {
+    if (this.circuitBreakerCache !== null) {
+      return this.circuitBreakerCache;
+    }
+
+    if (this.kv) {
+      const result = await this.kv.get<CircuitBreakerData>(ScriptStorage.CIRCUIT_BREAKER_KEY);
+      if (result.value) {
+        this.circuitBreakerCache = result.value;
+      } else {
+        this.circuitBreakerCache = {};
+      }
+    } else {
+      try {
+        const data = await Deno.readTextFile('./data/circuit_breaker.json');
+        this.circuitBreakerCache = JSON.parse(data);
+      } catch {
+        this.circuitBreakerCache = {};
+      }
+    }
+
+    return this.circuitBreakerCache;
+  }
+
+  private async saveCircuitBreakerState(): Promise<void> {
+    if (!this.circuitBreakerCache) return;
+
+    if (this.kv) {
+      await this.kv.set(ScriptStorage.CIRCUIT_BREAKER_KEY, this.circuitBreakerCache);
+    } else {
+      try {
+        await Deno.writeTextFile('./data/circuit_breaker.json', JSON.stringify(this.circuitBreakerCache, null, 2));
+      } catch (error) {
+        console.error(`[Storage] Failed to save circuit breaker state: ${error}`);
+      }
+    }
+  }
+
+  async isScriptCircuitBreakerTripped(scriptId: string): Promise<boolean> {
+    const states = await this.getCircuitBreakerState();
+    const state = states[scriptId];
+
+    if (!state || !state.isTripped) {
+      return false;
+    }
+
+    if (Date.now() >= state.resetAt) {
+      console.log(`[Storage] Circuit breaker for script ${scriptId} has reset`);
+      state.isTripped = false;
+      state.consecutiveFails = 0;
+      await this.saveCircuitBreakerState();
+      return false;
+    }
+
+    return true;
+  }
+
+  async recordScriptFailure(scriptId: string): Promise<boolean> {
+    const states = await this.getCircuitBreakerState();
+
+    if (!states[scriptId]) {
+      states[scriptId] = {
+        isTripped: false,
+        tripCount: 0,
+        lastTripAt: 0,
+        resetAt: 0,
+        consecutiveFails: 0,
+      };
+    }
+
+    const state = states[scriptId];
+    state.consecutiveFails++;
+
+    if (state.consecutiveFails >= ScriptStorage.CIRCUIT_BREAKER_THRESHOLD && !state.isTripped) {
+      state.isTripped = true;
+      state.tripCount++;
+      state.lastTripAt = Date.now();
+      state.resetAt = Date.now() + ScriptStorage.CIRCUIT_BREAKER_RESET_TIME;
+      console.log(`[Storage] Circuit breaker TRIPPED for script ${scriptId}. Will reset at ${new Date(state.resetAt).toISOString()}`);
+      await this.saveCircuitBreakerState();
+      return true;
+    }
+
+    console.log(`[Storage] Script ${scriptId} consecutive fails: ${state.consecutiveFails}/${ScriptStorage.CIRCUIT_BREAKER_THRESHOLD}`);
+    await this.saveCircuitBreakerState();
+    return false;
+  }
+
+  async recordScriptSuccess(scriptId: string): Promise<void> {
+    const states = await this.getCircuitBreakerState();
+
+    if (states[scriptId]) {
+      states[scriptId].consecutiveFails = 0;
+      if (states[scriptId].isTripped) {
+        states[scriptId].isTripped = false;
+        console.log(`[Storage] Circuit breaker RESET for script ${scriptId} due to success`);
+      }
+      await this.saveCircuitBreakerState();
+    }
+  }
+
+  async getSortedScriptsBySuccessRate(scriptIds: string[], defaultScriptId: string | null): Promise<string[]> {
+    const stats = await this.getScriptStats();
+
+    const sorted = [...scriptIds].sort((a, b) => {
+      if (a === defaultScriptId) return -1;
+      if (b === defaultScriptId) return 1;
+
+      const rateA = stats[a] ? this.getScriptSuccessRate(stats[a]) : 0.5;
+      const rateB = stats[b] ? this.getScriptSuccessRate(stats[b]) : 0.5;
+
+      return rateB - rateA;
+    });
+
+    return sorted;
+  }
+
   private generateApiKey(): string {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let result = '';
@@ -985,4 +1185,29 @@ interface ScriptSourceStats {
   [scriptId: string]: {
     [source: string]: SourceStats;
   };
+}
+
+interface ScriptStats {
+  success: number;
+  fail: number;
+  lastSuccessAt: number;
+  lastFailAt: number;
+  avgResponseTime: number;
+  totalRequests: number;
+}
+
+interface ScriptStatsData {
+  [scriptId: string]: ScriptStats;
+}
+
+interface CircuitBreakerState {
+  isTripped: boolean;
+  tripCount: number;
+  lastTripAt: number;
+  resetAt: number;
+  consecutiveFails: number;
+}
+
+interface CircuitBreakerData {
+  [scriptId: string]: CircuitBreakerState;
 }

@@ -21,6 +21,6 @@
     "strictNullChecks": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "lib": ["deno.ns", "dom"]
+    "lib": ["deno.ns", "dom", "deno.unstable"]
   }
 }

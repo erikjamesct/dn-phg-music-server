@@ -7,6 +7,11 @@ import { LyricService } from "../services/lyric_service.ts";
 import { SongListService } from "../services/songlist_service.ts";
 import { ShortLinkService } from "../services/shortlink_service.ts";
 
+const log = (...args: any[]) => {
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ') + '\n';
+  Deno.stderr.write(new TextEncoder().encode(msg));
+};
+
 interface ApiResponse<T = any> {
   code: number;
   msg: string;
@@ -73,11 +78,11 @@ class ApiResponseBuilder {
     };
   }
 
-  static serverError(msg: string = "internal server error"): ApiResponse<null> {
+  static serverError(msg: string = "internal server error", data: any = null): ApiResponse<any> {
     return {
       code: 500,
       msg,
-      data: null,
+      data,
     };
   }
 
@@ -262,7 +267,7 @@ export class APIRoutes {
     });
 
     router.post(`${prefix}/api/music/url`, async (ctx) => {
-      console.log('\n========== [API] 收到 /api/music/url 请求 ==========');
+      log(`\n========== [API] 收到 /api/music/url 请求 ${new Date().toISOString()} ==========`);
       const startTime = Date.now();
       const abortController = new AbortController();
       try {
@@ -272,21 +277,13 @@ export class APIRoutes {
           abortController
         );
         const duration = Date.now() - startTime;
-        console.log('[API] /api/music/url 调用完成，耗时:', duration, 'ms');
-        console.log('[API] 返回状态:', response.status);
-        const headersObj: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          headersObj[key] = value;
-        });
-        console.log('[API] 返回头:', headersObj);
-        const responseBody = await response.clone().text();
-        console.log('[API] 返回内容:', responseBody);
-        console.log('========== [API] /api/music/url 请求结束 ==========\n');
+        log(`[API] /api/music/url 调用完成，耗时: ${duration} ms`);
+        log('========== [API] /api/music/url 请求结束 ==========\n');
         return response;
       } catch (error: any) {
         const duration = Date.now() - startTime;
-        console.error('[API] /api/music/url 抛出异常:', error.message, `(${duration}ms)`);
-        console.log('========== [API] /api/music/url 请求异常结束 ==========\n');
+        log(`[API] /api/music/url 抛出异常: ${error.message} (${duration}ms)`);
+        log('========== [API] /api/music/url 请求异常结束 ==========\n');
         if (error.message.includes('超时')) {
           return ApiResponseBuilder.toResponse(ApiResponseBuilder.timeout(error.message), 504);
         }
@@ -573,7 +570,25 @@ export class APIRoutes {
     if (signal?.aborted) throw new Error('请求已被取消');
     try {
       const scripts = this.storage.getLoadedScripts();
-      return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(scripts));
+      const stats = await this.storage.getScriptStats();
+      
+      const scriptsWithStats = await Promise.all(scripts.map(async (script) => {
+        const scriptStats = stats[script.id];
+        const successRate = scriptStats ? this.storage.getScriptSuccessRate(scriptStats) : 0;
+        const totalRequests = scriptStats ? scriptStats.success + scriptStats.fail : 0;
+        const isCircuitBroken = await this.storage.isScriptCircuitBreakerTripped(script.id);
+        
+        return {
+          ...script,
+          successRate: totalRequests > 0 ? successRate : null,
+          successCount: scriptStats?.success || 0,
+          failCount: scriptStats?.fail || 0,
+          totalRequests,
+          isCircuitBroken,
+        };
+      }));
+      
+      return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(scriptsWithStats));
     } catch (error: any) {
       return ApiResponseBuilder.toResponse(ApiResponseBuilder.error(error.message, 500));
     }
@@ -815,21 +830,268 @@ export class APIRoutes {
     }
   }
 
+  private calculateScriptTimeouts(scriptIds: string[], realAvailableCount: number): Map<string, number> {
+    const TOTAL_TIMEOUT = 15000;
+    const timeouts = new Map<string, number>();
+
+    const count = realAvailableCount;
+
+    if (count === 0 || scriptIds.length === 0) {
+      return timeouts;
+    }
+
+    if (count === 1) {
+      timeouts.set(scriptIds[0], TOTAL_TIMEOUT);
+    } else if (count === 2) {
+      const perScript = 7300;
+      timeouts.set(scriptIds[0], perScript);
+      if (scriptIds.length > 1) {
+        timeouts.set(scriptIds[1], perScript);
+      }
+    } else {
+      const perScript = 4300;
+      for (const scriptId of scriptIds) {
+        timeouts.set(scriptId, perScript);
+      }
+    }
+
+    log(`[API] 计算脚本超时: 实际可用脚本数=${count}, 待执行脚本数=${scriptIds.length}, 每个脚本超时: ${timeouts.get(scriptIds[0])}ms`);
+    return timeouts;
+  }
+
+  private async getAvailableScriptsForSource(source: string): Promise<{ scriptIds: string[], realAvailableCount: number }> {
+    const allScriptIds = this.engine.getActiveScriptIds();
+    const defaultScriptId = await this.storage.getDefaultSource();
+    const stats = await this.storage.getScriptStats();
+
+    log(`[API] ===== 脚本状态检查 =====`);
+    log(`[API] 默认脚本: ${defaultScriptId || '未设置'}`);
+    log(`[API] 总脚本数: ${allScriptIds.length}`);
+
+    if (allScriptIds.length === 1) {
+      const scriptId = allScriptIds[0];
+      const scriptInfo = await this.storage.getScript(scriptId);
+      const scriptName = scriptInfo?.name || scriptId;
+      const scriptStats = stats[scriptId];
+      const successRate = scriptStats ? this.storage.getScriptSuccessRate(scriptStats) : 0.5;
+      const totalRequests = scriptStats ? scriptStats.success + scriptStats.fail : 0;
+      const rateStr = totalRequests > 0 ? `${(successRate * 100).toFixed(1)}% (${scriptStats?.success}/${totalRequests})` : '无数据';
+      
+      const isTripped = await this.storage.isScriptCircuitBreakerTripped(scriptId);
+      if (isTripped) {
+        log(`[API] 🔴 脚本 ${scriptName} (${scriptId}): 熔断中, 成功率: ${rateStr}`);
+        log(`[API] ⚠️ 只有一个脚本，强制使用熔断脚本尝试`);
+      } else {
+        log(`[API] 🟢 脚本 ${scriptName} (${scriptId}): 可用, 成功率: ${rateStr}`);
+      }
+      
+      log(`[API] ===== 排序结果 =====`);
+      log(`[API] 可用脚本 (1): ${scriptId}`);
+      log(`[API] 实际计算超时的脚本数: 1`);
+      log(`[API] ========================`);
+      return { scriptIds: [scriptId], realAvailableCount: 1 };
+    }
+
+    const availableScriptIds: string[] = [];
+    const circuitBrokenScripts: string[] = [];
+    const notSupportingSource: string[] = [];
+
+    for (const scriptId of allScriptIds) {
+      const scriptInfo = await this.storage.getScript(scriptId);
+      const scriptName = scriptInfo?.name || scriptId;
+      const isTripped = await this.storage.isScriptCircuitBreakerTripped(scriptId);
+      const scriptStats = stats[scriptId];
+      const successRate = scriptStats ? this.storage.getScriptSuccessRate(scriptStats) : 0.5;
+      const totalRequests = scriptStats ? scriptStats.success + scriptStats.fail : 0;
+      const rateStr = totalRequests > 0 ? `${(successRate * 100).toFixed(1)}% (${scriptStats?.success}/${totalRequests})` : '无数据';
+
+      const runner = this.engine.getRunner(scriptId);
+      const supportsSource = runner && runner.supportsSource(source);
+
+      if (isTripped) {
+        circuitBrokenScripts.push(scriptId);
+        if (supportsSource) {
+          log(`[API] 🔴 脚本 ${scriptName} (${scriptId}): 熔断中, 成功率: ${rateStr}`);
+        } else {
+          log(`[API] 🔴 脚本 ${scriptName} (${scriptId}): 熔断中, 不支持音源 ${source}`);
+        }
+        continue;
+      }
+
+      if (supportsSource) {
+        availableScriptIds.push(scriptId);
+        log(`[API] 🟢 脚本 ${scriptName} (${scriptId}): 可用, 成功率: ${rateStr}${scriptId === defaultScriptId ? ' [默认]' : ''}`);
+      } else {
+        notSupportingSource.push(scriptId);
+        log(`[API] ⚪ 脚本 ${scriptName} (${scriptId}): 不支持音源 ${source}`);
+      }
+    }
+
+    let realAvailableCount = availableScriptIds.length;
+    
+    if (availableScriptIds.length === 0 && circuitBrokenScripts.length > 0) {
+      log(`[API] ⚠️ 所有脚本都熔断，强制使用所有熔断脚本尝试`);
+      availableScriptIds.push(...circuitBrokenScripts);
+      realAvailableCount = circuitBrokenScripts.length;
+    }
+
+    const sortedScriptIds = await this.storage.getSortedScriptsBySuccessRate(availableScriptIds, defaultScriptId);
+
+    log(`[API] ===== 排序结果 =====`);
+    log(`[API] 熔断脚本 (${circuitBrokenScripts.length}): ${circuitBrokenScripts.length > 0 ? circuitBrokenScripts.join(', ') : '无'}`);
+    log(`[API] 可用脚本 (${sortedScriptIds.length}): ${sortedScriptIds.join(', ')}`);
+    log(`[API] 实际计算超时的脚本数: ${realAvailableCount}`);
+    log(`[API] ========================`);
+
+    return { scriptIds: sortedScriptIds, realAvailableCount };
+  }
+
+  private async tryGetMusicUrlWithScript(
+    scriptId: string,
+    body: any,
+    songId: string,
+    name: string,
+    singer: string,
+    timeoutMs: number
+  ): Promise<{ success: boolean; url?: string; type?: string; message?: string; scriptId: string; scriptName: string; responseTime: number }> {
+    const startTime = Date.now();
+    let scriptName = 'unknown';
+
+    const scriptInfo = await this.storage.getScript(scriptId);
+    if (scriptInfo) {
+      scriptName = scriptInfo.name;
+    }
+
+    log(`[API] 尝试脚本: ${scriptName} (${scriptId}), 超时: ${timeoutMs}ms`);
+
+    try {
+      const interval = body.interval || body.musicInfo?.interval || null;
+      const hash = body.hash || body.musicInfo?.hash || body.musicInfo?.songmid || '';
+      const albumName = body.albumName || body.musicInfo?.albumName || body.musicInfo?.album || '';
+      const picUrl = body.picUrl || body.musicInfo?.picUrl || null;
+      const strMediaMid = body.strMediaMid || body.musicInfo?.strMediaMid;
+      const copyrightId = body.copyrightId || body.musicInfo?.copyrightId;
+
+      const requestKey = `music_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const musicInfoSource = body.musicInfo?.source || body.source || 'unknown';
+
+      const requestData = {
+        requestKey,
+        data: {
+          source: musicInfoSource,
+          action: 'musicUrl',
+          info: {
+            type: body.quality,
+            musicInfo: {
+              id: songId,
+              name: name,
+              singer: singer,
+              source: musicInfoSource,
+              interval: interval,
+              songmid: songId,
+              meta: {
+                songId: songId,
+                albumName: albumName,
+                picUrl: picUrl,
+                hash: hash,
+                strMediaMid: strMediaMid,
+                copyrightId: copyrightId,
+              },
+            },
+          },
+        },
+      };
+
+      const runner = this.engine.getRunner(scriptId);
+      if (!runner) {
+        throw new Error(`Runner not found for script: ${scriptId}`);
+      }
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`脚本 ${scriptName} 超时 (${timeoutMs}ms)`)), timeoutMs);
+      });
+
+      const request = {
+        source: musicInfoSource,
+        action: 'musicUrl',
+        info: {
+          type: body.quality,
+          musicInfo: {
+            id: songId,
+            name: name,
+            singer: singer,
+            source: musicInfoSource,
+            interval: interval,
+            songmid: songId,
+            meta: {
+              songId: songId,
+              albumName: albumName,
+              picUrl: picUrl,
+              hash: hash,
+              strMediaMid: strMediaMid,
+              copyrightId: copyrightId,
+            },
+          },
+        },
+      };
+
+      const response = await Promise.race([
+        runner.request(request),
+        timeoutPromise,
+      ]);
+
+      const responseTime = Date.now() - startTime;
+
+      if (response && response.data && (response.data as any).url) {
+        log(`[API] 脚本 ${scriptName} 成功获取URL, 耗时: ${responseTime}ms`);
+        return {
+          success: true,
+          url: (response.data as any).url,
+          type: (response.data as any).type,
+          scriptId,
+          scriptName,
+          responseTime,
+        };
+      }
+
+      log(`[API] 脚本 ${scriptName} 未获取到URL, 耗时: ${responseTime}ms`);
+      return {
+        success: false,
+        message: '未获取到URL',
+        scriptId,
+        scriptName,
+        responseTime,
+      };
+    } catch (error: any) {
+      const responseTime = Date.now() - startTime;
+      return {
+        success: false,
+        message: error.message,
+        scriptId,
+        scriptName,
+        responseTime,
+      };
+    }
+  }
+
   private async handleGetMusicUrl(ctx: any, signal?: AbortSignal): Promise<Response> {
-    console.log('\n========== [API] handleGetMusicUrl 开始 ==========');
+    log('\n========== [API] handleGetMusicUrl 开始 ==========');
 
     if (signal?.aborted) {
       throw new Error('请求已被取消');
     }
 
+    let scriptId = 'unknown';
+    let scriptName = 'unknown';
+
     try {
       const body = await ctx.req.json();
-      console.log('[API] 请求参数:', JSON.stringify(body, null, 2));
+      log('[API] 请求参数:', JSON.stringify(body, null, 2));
 
       const requiredFields = ['source', 'quality'];
       for (const field of requiredFields) {
         if (!body[field]) {
-          console.error(`[API] 缺少必要参数: ${field}`);
+          log(`[API] 缺少必要参数: ${field}`);
           return ApiResponseBuilder.toResponse(ApiResponseBuilder.error(`缺少必要参数: ${field}`, 400));
         }
       }
@@ -838,15 +1100,7 @@ export class APIRoutes {
       const excludeSources = body.excludeSources || [];
 
       const songId = body.songmid || body.id || body.songId || body.musicInfo?.id || body.musicInfo?.songmid || body.musicInfo?.hash || '';
-      console.log('[API] songId 计算过程:');
-      console.log('[API]   body.songmid:', body.songmid);
-      console.log('[API]   body.id:', body.id);
-      console.log('[API]   body.songId:', body.songId);
-      console.log('[API]   body.musicInfo:', body.musicInfo);
-      console.log('[API]   body.musicInfo?.id:', body.musicInfo?.id);
-      console.log('[API]   body.musicInfo?.songmid:', body.musicInfo?.songmid);
-      console.log('[API]   body.musicInfo?.hash:', body.musicInfo?.hash);
-      console.log('[API]   最终 songId:', songId);
+      log('[API] 最终 songId:', songId);
 
       const cacheEnabled = await this.storage.isMusicUrlCacheEnabled();
       const cacheKey = `${body.source}_${songId}_${body.quality}`;
@@ -854,7 +1108,17 @@ export class APIRoutes {
       if (cacheEnabled && songId) {
         const cachedUrl = await this.storage.getMusicUrlCache(body.source, songId, body.quality);
         if (cachedUrl && cachedUrl.url) {
-          console.log(`[API] 使用缓存 URL, cacheKey: ${cacheKey}`);
+          log(`[API] 使用缓存 URL, cacheKey: ${cacheKey}`);
+          
+          const defaultScriptId = await this.storage.getDefaultSource();
+          scriptId = defaultScriptId || 'unknown';
+          if (defaultScriptId) {
+            const scriptInfo = await this.storage.getScript(defaultScriptId);
+            if (scriptInfo) {
+              scriptName = scriptInfo.name;
+            }
+          }
+          
           const responseData = {
             url: cachedUrl.url,
             type: cachedUrl.quality || body.quality,
@@ -866,99 +1130,184 @@ export class APIRoutes {
             lxlyric: '',
             cached: true,
             cachedAt: new Date(cachedUrl.cachedAt).toISOString(),
+            scriptId,
+            scriptName,
           };
-          console.log('[API] 返回缓存数据:', JSON.stringify(responseData, null, 2));
-          console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
+          log('[API] 返回缓存数据');
+          log('========== [API] handleGetMusicUrl 结束 ==========\n');
           return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(responseData, "获取成功（缓存）"));
         }
-        console.log(`[API] 缓存未命中, cacheKey: ${cacheKey}`);
+        log(`[API] 缓存未命中, cacheKey: ${cacheKey}`);
       }
 
       const name = body.name || body.musicInfo?.name || '未知歌曲';
       const singer = body.singer || body.musicInfo?.singer || '未知歌手';
-
-      const defaultScriptId = await this.storage.getDefaultSource();
-      const scriptId = defaultScriptId || 'unknown';
       const originalSource = body.source;
 
-      const lyricPromise = this.getLyricForMusicUrl(body, songId, name, singer, '', '');
-      lyricPromise.then(() => console.log('[API] 歌词获取完成')).catch(e => console.log('[API] 歌词获取失败:', e.message));
-
-      const result = await this.tryGetMusicUrl(body, songId, name, singer);
+      log('[API] 步骤1: 获取可用脚本（跳过熔断）');
+      const scriptsInfo = await this.getAvailableScriptsForSource(originalSource);
+      const availableScriptIds = scriptsInfo.scriptIds;
+      const realAvailableCount = scriptsInfo.realAvailableCount;
       
-      if (result.success && result.url) {
-        if (result.url.endsWith('2149972737147268278.mp3')) {
-          console.error('[API] 检测到无效URL，判断获取失败');
-          await this.storage.updateSourceStats(scriptId, originalSource, false);
+      if (availableScriptIds.length === 0) {
+        log('[API] 没有可用的脚本');
+        return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("没有可用的脚本", 500, {
+          source: body.source,
+          scriptId,
+          scriptName,
+        }));
+      }
+
+      log('[API] 步骤2: 计算脚本超时时间');
+      const scriptTimeouts = this.calculateScriptTimeouts(availableScriptIds, realAvailableCount);
+
+      const lyricPromise = this.getLyricForMusicUrl(body, songId, name, singer, '', '');
+      lyricPromise.then(() => log('[API] 歌词获取完成')).catch(e => log('[API] 歌词获取失败:', e.message));
+
+      const triedScripts: { scriptId: string; scriptName: string; message: string; responseTime: number }[] = [];
+      let lastResult: { success: boolean; url?: string; type?: string; message?: string; scriptId: string; scriptName: string; responseTime: number } | null = null;
+
+      log('[API] 步骤3: 开始依次尝试脚本');
+      for (const currentScriptId of availableScriptIds) {
+        const timeoutMs = scriptTimeouts.get(currentScriptId) || 5000;
+        
+        const result = await this.tryGetMusicUrlWithScript(
+          currentScriptId,
+          body,
+          songId,
+          name,
+          singer,
+          timeoutMs
+        );
+
+        if (result.success && result.url) {
+          if (result.url.endsWith('2149972737147268278.mp3')) {
+            log('[API] 检测到无效URL（黑名单），触发换源获取');
+            triedScripts.push({
+              scriptId: result.scriptId,
+              scriptName: result.scriptName,
+              message: '黑名单URL',
+              responseTime: result.responseTime,
+            });
+            await this.storage.updateScriptStats(currentScriptId, false, result.responseTime);
+            await this.storage.updateSourceStats(currentScriptId, originalSource, false);
+
+            if (allowToggleSource) {
+              // 计算剩余超时时间
+              const remainingTimeout = timeoutMs - result.responseTime;
+              return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, result.scriptId, result.scriptName, lyricPromise, signal, remainingTimeout);
+            }
+
+            return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("获取播放URL失败（黑名单）", 500, {
+              source: body.source,
+              scriptId: result.scriptId,
+              scriptName: result.scriptName,
+              triedScripts,
+            }));
+          }
+
+          log(`[API] ✅ 脚本成功获取URL，更新统计`);
+          await this.storage.updateScriptStats(currentScriptId, true, result.responseTime);
+          await this.storage.recordScriptSuccess(currentScriptId);
+          await this.storage.updateSourceStats(currentScriptId, originalSource, true);
+
+          if (cacheEnabled && songId) {
+            await this.storage.setMusicUrlCache(body.source, songId, result.url, body.quality);
+            log(`[API] 已缓存 URL, cacheKey: ${cacheKey}`);
+          }
+
+          let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
+          try {
+            const lyricData = await Promise.race([
+              lyricPromise,
+              new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 3000))
+            ]);
+            lyricResult = {
+              lyric: lyricData.lyric || '',
+              tlyric: lyricData.tlyric || '',
+              rlyric: lyricData.rlyric || '',
+              lxlyric: lyricData.lxlyric || '',
+            };
+          } catch (e) {
+            log('[API] 歌词获取超时或失败，继续返回播放URL');
+          }
+
+          const responseData = {
+            url: result.url,
+            type: result.type || body.quality,
+            source: body.source,
+            quality: body.quality,
+            lyric: lyricResult.lyric || '',
+            tlyric: lyricResult.tlyric || '',
+            rlyric: lyricResult.rlyric || '',
+            lxlyric: lyricResult.lxlyric || '',
+            cached: false,
+            fallback: {
+              toggled: false,
+              originalSource: originalSource,
+            },
+            scriptId: result.scriptId,
+            scriptName: result.scriptName,
+            triedScripts: triedScripts.length > 0 ? triedScripts : undefined,
+          };
+          log('[API] 最终响应: 成功');
+          log('========== [API] handleGetMusicUrl 结束 ==========\n');
+          return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(responseData, "获取成功"));
+        }
+
+        log(`[API] ❌ 脚本 ${result.scriptName} 失败: ${result.message}, 耗时: ${result.responseTime}ms`);
+        triedScripts.push({
+          scriptId: result.scriptId,
+          scriptName: result.scriptName,
+          message: result.message || '未知错误',
+          responseTime: result.responseTime,
+        });
+
+        await this.storage.updateScriptStats(currentScriptId, false, result.responseTime);
+        await this.storage.updateSourceStats(currentScriptId, originalSource, false);
+        
+        const circuitTripped = await this.storage.recordScriptFailure(currentScriptId);
+        if (circuitTripped) {
+          log(`[API] 🔴 脚本 ${result.scriptName} 已触发熔断（连续失败3次，熔断2小时）`);
+        }
+
+        if (allowToggleSource) {
+          const remainingTimeout = timeoutMs - result.responseTime;
+          log(`[API] 尝试在当前脚本内换源获取，剩余超时: ${remainingTimeout}ms`);
           
-          if (allowToggleSource) {
-            return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise, signal);
+          const toggleResult = await this.tryToggleSourceInternal(
+            body, songId, name, singer, originalSource, excludeSources,
+            currentScriptId, result.scriptName, lyricPromise, signal, remainingTimeout
+          );
+          
+          if (toggleResult.success && toggleResult.url) {
+            log(`[API] ✅ 当前脚本换源成功`);
+            return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(toggleResult.responseData, "获取成功（换源）"));
           }
           
-          return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("获取播放URL失败", 500, {
-            source: body.source,
-          }));
+          log(`[API] 当前脚本换源失败: ${toggleResult.message}`);
         }
 
-        await this.storage.updateSourceStats(scriptId, originalSource, true);
-
-        if (cacheEnabled && songId) {
-          await this.storage.setMusicUrlCache(body.source, songId, result.url, body.quality);
-          console.log(`[API] 已缓存 URL, cacheKey: ${cacheKey}`);
-        }
-
-        let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
-        try {
-          const result = await Promise.race([
-            lyricPromise,
-            new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 3000))
-          ]);
-          lyricResult = {
-            lyric: result.lyric || '',
-            tlyric: result.tlyric || '',
-            rlyric: result.rlyric || '',
-            lxlyric: result.lxlyric || '',
-          };
-        } catch (e) {
-          console.log('[API] 歌词获取超时或失败，继续返回播放URL');
-        }
-
-        const responseData = {
-          url: result.url,
-          type: result.type || body.quality,
-          source: body.source,
-          quality: body.quality,
-          lyric: lyricResult.lyric || '',
-          tlyric: lyricResult.tlyric || '',
-          rlyric: lyricResult.rlyric || '',
-          lxlyric: lyricResult.lxlyric || '',
-          cached: false,
-          fallback: {
-            toggled: false,
-            originalSource: originalSource,
-          },
-        };
-        console.log('[API] 最终响应:', JSON.stringify(responseData, null, 2));
-        console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
-        return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(responseData, "获取成功"));
+        lastResult = result;
+        log(`[API] → 切换到下一个脚本...`);
       }
 
-      await this.storage.updateSourceStats(scriptId, originalSource, false);
-
-      if (allowToggleSource) {
-        return await this.tryToggleSource(body, songId, name, singer, originalSource, excludeSources, scriptId, lyricPromise, signal);
-      }
-
-      console.error('[API] 获取播放URL失败:', result.message);
-      console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
-      return ApiResponseBuilder.toResponse(ApiResponseBuilder.error(result.message || "获取播放URL失败", 500, {
+      log('[API] 所有脚本尝试完毕，均失败');
+      log('========== [API] handleGetMusicUrl 结束 ==========\n');
+      return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("所有脚本均获取失败", 500, {
         source: body.source,
+        scriptId: lastResult?.scriptId || 'unknown',
+        scriptName: lastResult?.scriptName || 'unknown',
+        triedScripts,
       }));
     } catch (error: any) {
-      console.error('[API] handleGetMusicUrl 抛出异常:', error.message);
-      console.error('[API] 异常堆栈:', error.stack);
-      console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
-      return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message));
+      log('[API] handleGetMusicUrl 抛出异常:', error.message);
+      log('[API] 异常堆栈:', error.stack);
+      log('========== [API] handleGetMusicUrl 结束 ==========\n');
+      return ApiResponseBuilder.toResponse(ApiResponseBuilder.serverError(error.message, {
+        scriptId,
+        scriptName,
+      }));
     }
   }
 
@@ -1017,7 +1366,7 @@ export class APIRoutes {
     return { success: false, message: result.message || "获取播放URL失败" };
   }
 
-  private async tryToggleSource(
+  private async tryToggleSourceInternal(
     body: any,
     songId: string,
     name: string,
@@ -1025,17 +1374,19 @@ export class APIRoutes {
     originalSource: string,
     excludeSources: string[],
     scriptId: string,
+    scriptName: string,
     lyricPromise?: Promise<{lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string}>,
-    signal?: AbortSignal
-  ): Promise<Response> {
-    console.log(`[API] 开始换源流程，原始音源: ${originalSource}`);
+    signal?: AbortSignal,
+    remainingTimeout: number = 15000
+  ): Promise<{ success: boolean; url?: string; type?: string; message?: string; responseData?: any }> {
+    log(`[API] 开始换源流程（内部），原始音源: ${originalSource}, 剩余超时: ${remainingTimeout}ms`);
 
     if (signal?.aborted) {
-      throw new Error('请求已被取消');
+      return { success: false, message: '请求已被取消' };
     }
 
     const keyword = `${name} ${singer}`.trim();
-    console.log(`[API] 跨源搜索关键词: ${keyword}`);
+    log(`[API] 跨源搜索关键词: ${keyword}`);
 
     const targetInterval = body.interval || body.musicInfo?.interval;
     const targetAlbumName = body.albumName || body.musicInfo?.albumName || body.musicInfo?.album;
@@ -1043,7 +1394,11 @@ export class APIRoutes {
     const allSources = ['kw', 'kg', 'tx', 'wy', 'mg'];
     const sourcesToSearch = allSources.filter(s => s !== originalSource && !excludeSources.includes(s));
     
-    console.log(`[API] 并行搜索音源: ${sourcesToSearch.join(', ')}`);
+    if (sourcesToSearch.length === 0) {
+      return { success: false, message: '没有可用的换源源' };
+    }
+    
+    log(`[API] 并行搜索音源: ${sourcesToSearch.join(', ')}`);
 
     const searchPromises = sourcesToSearch.map(async (source) => {
       if (signal?.aborted) {
@@ -1054,7 +1409,7 @@ export class APIRoutes {
         const searchResult = searchResults.find(r => r.platform === source);
         return { source, searchResult };
       } catch (error: any) {
-        console.log(`[API] ${source} 搜索失败: ${error.message}`);
+        log(`[API] ${source} 搜索失败: ${error.message}`);
         return { source, searchResult: null };
       }
     });
@@ -1062,13 +1417,13 @@ export class APIRoutes {
     const searchResultsArray = await Promise.all(searchPromises);
 
     if (signal?.aborted) {
-      throw new Error('请求已被取消');
+      return { success: false, message: '请求已被取消' };
     }
 
     const matchedSongs: any[] = [];
     for (const { source, searchResult } of searchResultsArray) {
       if (!searchResult || searchResult.results.length === 0) {
-        console.log(`[API] ${source} 搜索结果为空`);
+        log(`[API] ${source} 搜索结果为空`);
         continue;
       }
 
@@ -1079,36 +1434,40 @@ export class APIRoutes {
           source,
           matchScore: matchedSong.matchScore || 0,
         });
-        console.log(`[API] ${source} 找到匹配歌曲: ${matchedSong.name} - ${matchedSong.singer} (匹配度: ${matchedSong.matchScore || 0})`);
+        log(`[API] ${source} 找到匹配歌曲: ${matchedSong.name} - ${matchedSong.singer} (匹配度: ${matchedSong.matchScore || 0})`);
       } else {
-        console.log(`[API] ${source} 未找到匹配歌曲`);
+        log(`[API] ${source} 未找到匹配歌曲`);
       }
     }
 
     if (matchedSongs.length === 0) {
-      console.log('[API] 所有音源均未找到匹配歌曲');
-      return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("未找到匹配歌曲", 404, {
-        source: originalSource,
-      }));
+      return { success: false, message: '所有音源均未找到匹配歌曲' };
     }
 
     const sourceStats = await this.storage.getSourceStatsForScript(scriptId);
     const sortedSongs = this.sortByMatchAndSuccessRate(matchedSongs, sourceStats);
     
-    console.log(`[API] 综合排序后的歌曲列表:`);
+    log(`[API] 综合排序后的歌曲列表 (基于脚本 ${scriptName} 的源成功率):`);
     sortedSongs.forEach((song: any, index: number) => {
       const stats = sourceStats[song.source];
       const rate = stats ? ((stats.success / (stats.success + stats.fail)) * 100).toFixed(1) : '0.0';
-      console.log(`[API]   ${index + 1}. ${song.source}: ${song.name} - ${song.singer} (匹配度: ${song.matchScore?.toFixed(2) || 0}, 成功率: ${rate}%)`);
+      log(`[API]   ${index + 1}. ${song.source}: ${song.name} - ${song.singer} (匹配度: ${song.matchScore?.toFixed(2) || 0}, 成功率: ${rate}%)`);
     });
+
+    let currentRemainingTimeout = remainingTimeout;
 
     for (const song of sortedSongs) {
       if (signal?.aborted) {
-        throw new Error('请求已被取消');
+        return { success: false, message: '请求已被取消' };
+      }
+
+      if (currentRemainingTimeout <= 0) {
+        log(`[API] 剩余超时时间已用完，停止换源尝试`);
+        break;
       }
 
       const newSource = song.source;
-      console.log(`[API] 尝试从 ${newSource} 获取播放URL`);
+      log(`[API] 尝试从 ${newSource} 获取播放URL (使用脚本: ${scriptName}, 剩余超时: ${currentRemainingTimeout}ms)`);
 
       try {
         const newBody = {
@@ -1122,34 +1481,46 @@ export class APIRoutes {
         };
 
         const newSongId = song.musicInfo?.songmid || song.musicInfo?.id || song.id || song.hash;
-        const result = await this.tryGetMusicUrl(newBody, newSongId, song.name, song.singer);
+        
+        const result = await this.tryGetMusicUrlWithScript(
+          scriptId,
+          newBody,
+          newSongId,
+          song.name,
+          song.singer,
+          currentRemainingTimeout
+        );
+
+        currentRemainingTimeout -= result.responseTime;
 
         if (result.success && result.url) {
           if (result.url.endsWith('2149972737147268278.mp3')) {
-            console.log(`[API] ${newSource} 返回无效URL，继续尝试下一个`);
+            log(`[API] ${newSource} 返回无效URL，继续尝试下一个`);
             await this.storage.updateSourceStats(scriptId, newSource, false);
             continue;
           }
 
           await this.storage.updateSourceStats(scriptId, newSource, true);
-          console.log(`[API] 换源成功: ${originalSource} -> ${newSource}`);
+          await this.storage.updateScriptStats(scriptId, true, result.responseTime);
+          await this.storage.recordScriptSuccess(scriptId);
+          log(`[API] ✅ 换源成功: ${originalSource} -> ${newSource}`);
 
           let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
           
           if (lyricPromise) {
             try {
-              const result = await Promise.race([
+              const lyricData = await Promise.race([
                 lyricPromise,
                 new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 2000))
               ]);
               lyricResult = {
-                lyric: result.lyric || '',
-                tlyric: result.tlyric || '',
-                rlyric: result.rlyric || '',
-                lxlyric: result.lxlyric || '',
+                lyric: lyricData.lyric || '',
+                tlyric: lyricData.tlyric || '',
+                rlyric: lyricData.rlyric || '',
+                lxlyric: lyricData.lxlyric || '',
               };
             } catch (e) {
-              console.log('[API] 原始歌词获取失败，尝试获取新音源歌词');
+              log('[API] 原始歌词获取失败，尝试获取新音源歌词');
             }
           }
           
@@ -1188,7 +1559,7 @@ export class APIRoutes {
                 lxlyric: newLyricResult.lxlyric || '',
               };
             } catch (e) {
-              console.log('[API] 新音源歌词获取失败');
+              log('[API] 新音源歌词获取失败');
             }
           }
 
@@ -1211,6 +1582,243 @@ export class APIRoutes {
                 singer: song.singer,
               },
             },
+            scriptId,
+            scriptName,
+          };
+          
+          return { success: true, url: result.url, type: result.type, responseData };
+        }
+
+        await this.storage.updateSourceStats(scriptId, newSource, false);
+        log(`[API] ${newSource} 获取URL失败，耗时: ${result.responseTime}ms, 剩余超时: ${currentRemainingTimeout}ms`);
+      } catch (error: any) {
+        log(`[API] ${newSource} 换源异常: ${error.message}`);
+        await this.storage.updateSourceStats(scriptId, newSource, false);
+      }
+    }
+
+    return { success: false, message: '所有音源均获取失败' };
+  }
+
+  private async tryToggleSource(
+    body: any,
+    songId: string,
+    name: string,
+    singer: string,
+    originalSource: string,
+    excludeSources: string[],
+    scriptId: string,
+    scriptName: string,
+    lyricPromise?: Promise<{lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string}>,
+    signal?: AbortSignal,
+    remainingTimeout: number = 15000
+  ): Promise<Response> {
+    log(`[API] 开始换源流程，原始音源: ${originalSource}, 剩余超时: ${remainingTimeout}ms`);
+
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
+    const keyword = `${name} ${singer}`.trim();
+    log(`[API] 跨源搜索关键词: ${keyword}`);
+
+    const targetInterval = body.interval || body.musicInfo?.interval;
+    const targetAlbumName = body.albumName || body.musicInfo?.albumName || body.musicInfo?.album;
+
+    const allSources = ['kw', 'kg', 'tx', 'wy', 'mg'];
+    const sourcesToSearch = allSources.filter(s => s !== originalSource && !excludeSources.includes(s));
+    
+    log(`[API] 并行搜索音源: ${sourcesToSearch.join(', ')}`);
+
+    const searchPromises = sourcesToSearch.map(async (source) => {
+      if (signal?.aborted) {
+        return { source, searchResult: null };
+      }
+      try {
+        const searchResults = await this.searchService.search(keyword, source, 1, 10);
+        const searchResult = searchResults.find(r => r.platform === source);
+        return { source, searchResult };
+      } catch (error: any) {
+        log(`[API] ${source} 搜索失败: ${error.message}`);
+        return { source, searchResult: null };
+      }
+    });
+
+    const searchResultsArray = await Promise.all(searchPromises);
+
+    if (signal?.aborted) {
+      throw new Error('请求已被取消');
+    }
+
+    const matchedSongs: any[] = [];
+    for (const { source, searchResult } of searchResultsArray) {
+      if (!searchResult || searchResult.results.length === 0) {
+        log(`[API] ${source} 搜索结果为空`);
+        continue;
+      }
+
+      const matchedSong = this.findBestMatch(searchResult.results, name, singer, targetInterval, targetAlbumName);
+      if (matchedSong) {
+        matchedSongs.push({
+          ...matchedSong,
+          source,
+          matchScore: matchedSong.matchScore || 0,
+        });
+        log(`[API] ${source} 找到匹配歌曲: ${matchedSong.name} - ${matchedSong.singer} (匹配度: ${matchedSong.matchScore || 0})`);
+      } else {
+        log(`[API] ${source} 未找到匹配歌曲`);
+      }
+    }
+
+    if (matchedSongs.length === 0) {
+      log('[API] 所有音源均未找到匹配歌曲');
+      return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("未找到匹配歌曲", 404, {
+        source: originalSource,
+        scriptId,
+        scriptName,
+      }));
+    }
+
+    const sourceStats = await this.storage.getSourceStatsForScript(scriptId);
+    const sortedSongs = this.sortByMatchAndSuccessRate(matchedSongs, sourceStats);
+    
+    log(`[API] 综合排序后的歌曲列表 (基于脚本 ${scriptName} 的源成功率):`);
+    sortedSongs.forEach((song: any, index: number) => {
+      const stats = sourceStats[song.source];
+      const rate = stats ? ((stats.success / (stats.success + stats.fail)) * 100).toFixed(1) : '0.0';
+      log(`[API]   ${index + 1}. ${song.source}: ${song.name} - ${song.singer} (匹配度: ${song.matchScore?.toFixed(2) || 0}, 成功率: ${rate}%)`);
+    });
+
+    let currentRemainingTimeout = remainingTimeout;
+
+    for (const song of sortedSongs) {
+      if (signal?.aborted) {
+        throw new Error('请求已被取消');
+      }
+
+      if (currentRemainingTimeout <= 0) {
+        log(`[API] 剩余超时时间已用完，停止换源尝试`);
+        break;
+      }
+
+      const newSource = song.source;
+      log(`[API] 尝试从 ${newSource} 获取播放URL (使用脚本: ${scriptName}, 剩余超时: ${currentRemainingTimeout}ms)`);
+
+      try {
+        const newBody = {
+          ...body,
+          source: newSource,
+          musicInfo: {
+            ...body.musicInfo,
+            ...song.musicInfo,
+            source: newSource,
+          },
+        };
+
+        const newSongId = song.musicInfo?.songmid || song.musicInfo?.id || song.id || song.hash;
+        
+        const result = await this.tryGetMusicUrlWithScript(
+          scriptId,
+          newBody,
+          newSongId,
+          song.name,
+          song.singer,
+          currentRemainingTimeout
+        );
+
+        currentRemainingTimeout -= result.responseTime;
+
+        if (result.success && result.url) {
+          if (result.url.endsWith('2149972737147268278.mp3')) {
+            log(`[API] ${newSource} 返回无效URL，继续尝试下一个`);
+            await this.storage.updateSourceStats(scriptId, newSource, false);
+            continue;
+          }
+
+          await this.storage.updateSourceStats(scriptId, newSource, true);
+          await this.storage.updateScriptStats(scriptId, true, result.responseTime);
+          await this.storage.recordScriptSuccess(scriptId);
+          log(`[API] ✅ 换源成功: ${originalSource} -> ${newSource}`);
+
+          let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
+          
+          if (lyricPromise) {
+            try {
+              const result = await Promise.race([
+                lyricPromise,
+                new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 2000))
+              ]);
+              lyricResult = {
+                lyric: result.lyric || '',
+                tlyric: result.tlyric || '',
+                rlyric: result.rlyric || '',
+                lxlyric: result.lxlyric || '',
+              };
+            } catch (e) {
+              log('[API] 原始歌词获取失败，尝试获取新音源歌词');
+            }
+          }
+          
+          if (!lyricResult.lyric) {
+            try {
+              let lyricSongId = '';
+              let lyricHash = '';
+              let lyricCopyrightId = '';
+              
+              switch (newSource) {
+                case 'kw':
+                  lyricSongId = song.musicInfo?.songmid || song.id || '';
+                  break;
+                case 'kg':
+                  lyricHash = song.musicInfo?.hash || song.hash || '';
+                  break;
+                case 'tx':
+                  lyricSongId = song.musicInfo?.songmid || song.musicInfo?.songId || song.id || '';
+                  break;
+                case 'wy':
+                  lyricSongId = song.musicInfo?.songId || song.musicInfo?.id || song.id || '';
+                  break;
+                case 'mg':
+                  lyricCopyrightId = song.musicInfo?.copyrightId || song.id || '';
+                  break;
+              }
+              
+              const newLyricResult = await Promise.race([
+                this.getLyricForMusicUrl(newBody, lyricSongId, song.name, song.singer, lyricHash, lyricCopyrightId),
+                new Promise<{ lyric: string; tlyric: string; rlyric: string; lxlyric: string }>((resolve) => setTimeout(() => resolve({ lyric: '', tlyric: '', rlyric: '', lxlyric: '' }), 3000))
+              ]);
+              lyricResult = {
+                lyric: newLyricResult.lyric || '',
+                tlyric: newLyricResult.tlyric || '',
+                rlyric: newLyricResult.rlyric || '',
+                lxlyric: newLyricResult.lxlyric || '',
+              };
+            } catch (e) {
+              log('[API] 新音源歌词获取失败');
+            }
+          }
+
+          const responseData = {
+            url: result.url,
+            type: result.type || body.quality,
+            source: newSource,
+            quality: body.quality,
+            lyric: lyricResult.lyric || '',
+            tlyric: lyricResult.tlyric || '',
+            rlyric: lyricResult.rlyric || '',
+            lxlyric: lyricResult.lxlyric || '',
+            cached: false,
+            fallback: {
+              toggled: true,
+              originalSource: originalSource,
+              newSource: newSource,
+              matchedSong: {
+                name: song.name,
+                singer: song.singer,
+              },
+            },
+            scriptId,
+            scriptName,
           };
           console.log('[API] 换源成功响应:', JSON.stringify(responseData, null, 2));
           console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
@@ -1218,18 +1826,20 @@ export class APIRoutes {
         }
 
         await this.storage.updateSourceStats(scriptId, newSource, false);
-        console.log(`[API] ${newSource} 获取URL失败，继续尝试下一个`);
+        log(`[API] ${newSource} 获取URL失败，耗时: ${result.responseTime}ms, 剩余超时: ${currentRemainingTimeout}ms`);
       } catch (error: any) {
-        console.error(`[API] ${newSource} 换源异常:`, error.message);
+        log(`[API] ${newSource} 换源异常: ${error.message}`);
         await this.storage.updateSourceStats(scriptId, newSource, false);
       }
     }
 
-    console.log('[API] 所有音源尝试完毕，均失败');
-    console.log('========== [API] handleGetMusicUrl 结束 ==========\n');
+    log('[API] 所有音源尝试完毕，均失败');
+    log('========== [API] handleGetMusicUrl 结束 ==========\n');
     return ApiResponseBuilder.toResponse(ApiResponseBuilder.error("所有音源均获取失败", 500, {
       source: originalSource,
       triedSources: sortedSongs.map((s: any) => s.source),
+      scriptId,
+      scriptName,
     }));
   }
 
