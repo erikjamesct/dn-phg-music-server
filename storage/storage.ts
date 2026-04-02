@@ -80,10 +80,8 @@ export class ScriptStorage {
 
   private async loadFromStorage(): Promise<void> {
     try {
-      // 确保数据目录存在
       await ensureDataDir();
       
-      // 初始化 KV（用于缓存功能）
       this.kv = await this.initKv();
       if (this.kv) {
         console.log("[Storage] KV initialized successfully");
@@ -91,7 +89,6 @@ export class ScriptStorage {
         console.log("[Storage] KV not available, caching will be disabled");
       }
 
-      // Deno Deploy 环境使用 KV 存储脚本
       if (isDenoDeploy) {
         if (this.kv) {
           const result = await this.kv.get<StorageData>([STORAGE_KEY]);
@@ -99,8 +96,6 @@ export class ScriptStorage {
             const data = result.value;
             if (data.scripts) {
               for (const item of data.scripts) {
-                // 脚本内容不存储在 KV 中，只存储 URL
-                // 脚本内容会在需要时从 URL 获取
                 this.scripts.set(item.id, item);
               }
             }
@@ -110,10 +105,11 @@ export class ScriptStorage {
         } else {
           console.log("[Storage] Deno Deploy environment but KV not available, scripts will be empty");
         }
+        
+        await this.preloadCaches();
         return;
       }
 
-      // 本地环境使用文件
       let storedData: string | null = null;
       
       try {
@@ -136,8 +132,54 @@ export class ScriptStorage {
         const scriptCount = this.scripts.size;
         console.log(`[Storage] Loaded ${scriptCount} scripts from file`);
       }
+
+      await this.preloadCaches();
     } catch (error) {
       console.error("加载脚本存储失败:", error);
+    }
+  }
+
+  private async preloadCaches(): Promise<void> {
+    console.log("[Storage] Preloading caches...");
+    
+    if (this.kv) {
+      try {
+        const [scriptStatsResult, sourceStatsResult, circuitBreakerResult] = await Promise.all([
+          this.kv.get<ScriptStatsData>(ScriptStorage.SCRIPT_STATS_KEY),
+          this.kv.get<ScriptSourceStats>(ScriptStorage.SOURCE_STATS_KEY),
+          this.kv.get<CircuitBreakerData>(ScriptStorage.CIRCUIT_BREAKER_KEY),
+        ]);
+        
+        this.scriptStatsCache = scriptStatsResult.value || {};
+        this.sourceStatsCache = sourceStatsResult.value || {};
+        this.circuitBreakerCache = circuitBreakerResult.value || {};
+        
+        console.log("[Storage] Caches preloaded from KV");
+      } catch (error) {
+        console.error("[Storage] Failed to preload caches from KV:", error);
+        this.scriptStatsCache = {};
+        this.sourceStatsCache = {};
+        this.circuitBreakerCache = {};
+      }
+    } else {
+      try {
+        const [scriptStatsData, sourceStatsData, circuitBreakerData] = await Promise.all([
+          Deno.readTextFile('./data/script_stats.json').catch(() => '{}'),
+          Deno.readTextFile(SOURCE_STATS_FILE).catch(() => '{}'),
+          Deno.readTextFile('./data/circuit_breaker.json').catch(() => '{}'),
+        ]);
+        
+        this.scriptStatsCache = JSON.parse(scriptStatsData);
+        this.sourceStatsCache = JSON.parse(sourceStatsData);
+        this.circuitBreakerCache = JSON.parse(circuitBreakerData);
+        
+        console.log("[Storage] Caches preloaded from files");
+      } catch (error) {
+        console.error("[Storage] Failed to preload caches from files:", error);
+        this.scriptStatsCache = {};
+        this.sourceStatsCache = {};
+        this.circuitBreakerCache = {};
+      }
     }
   }
 
@@ -519,6 +561,22 @@ export class ScriptStorage {
       });
     }
     return result;
+  }
+
+  getScriptMetadata(id: string): { id: string; name: string; description: string; author: string; homepage: string; version: string; supportedSources: string[] } | null {
+    const item = this.scripts.get(id);
+    if (!item) {
+      return null;
+    }
+    return {
+      id: item.id,
+      name: item.name,
+      description: item.description,
+      author: item.author,
+      homepage: item.homepage,
+      version: item.version,
+      supportedSources: item.supportedSources,
+    };
   }
 
   async getAllScripts(): Promise<ScriptInfo[]> {

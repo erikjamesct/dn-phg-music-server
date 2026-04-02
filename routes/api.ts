@@ -861,7 +861,7 @@ export class APIRoutes {
 
   private async getAvailableScriptsForSource(source: string): Promise<{ scriptIds: string[], realAvailableCount: number }> {
     const allScriptIds = this.engine.getActiveScriptIds();
-    const defaultScriptId = await this.storage.getDefaultSource();
+    const defaultScriptId = this.storage.getDefaultSource();
     const stats = await this.storage.getScriptStats();
 
     log(`[API] ===== 脚本状态检查 =====`);
@@ -870,7 +870,7 @@ export class APIRoutes {
 
     if (allScriptIds.length === 1) {
       const scriptId = allScriptIds[0];
-      const scriptInfo = await this.storage.getScript(scriptId);
+      const scriptInfo = this.storage.getScriptMetadata(scriptId);
       const scriptName = scriptInfo?.name || scriptId;
       const scriptStats = stats[scriptId];
       const successRate = scriptStats ? this.storage.getScriptSuccessRate(scriptStats) : 0.5;
@@ -897,7 +897,7 @@ export class APIRoutes {
     const notSupportingSource: string[] = [];
 
     for (const scriptId of allScriptIds) {
-      const scriptInfo = await this.storage.getScript(scriptId);
+      const scriptInfo = this.storage.getScriptMetadata(scriptId);
       const scriptName = scriptInfo?.name || scriptId;
       const isTripped = await this.storage.isScriptCircuitBreakerTripped(scriptId);
       const scriptStats = stats[scriptId];
@@ -957,7 +957,7 @@ export class APIRoutes {
     const startTime = Date.now();
     let scriptName = 'unknown';
 
-    const scriptInfo = await this.storage.getScript(scriptId);
+    const scriptInfo = this.storage.getScriptMetadata(scriptId);
     if (scriptInfo) {
       scriptName = scriptInfo.name;
     }
