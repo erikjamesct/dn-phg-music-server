@@ -1102,44 +1102,6 @@ export class APIRoutes {
       const songId = body.songmid || body.id || body.songId || body.musicInfo?.id || body.musicInfo?.songmid || body.musicInfo?.hash || '';
       log('[API] 最终 songId:', songId);
 
-      const cacheEnabled = await this.storage.isMusicUrlCacheEnabled();
-      const cacheKey = `${body.source}_${songId}_${body.quality}`;
-
-      if (cacheEnabled && songId) {
-        const cachedUrl = await this.storage.getMusicUrlCache(body.source, songId, body.quality);
-        if (cachedUrl && cachedUrl.url) {
-          log(`[API] 使用缓存 URL, cacheKey: ${cacheKey}`);
-          
-          const defaultScriptId = await this.storage.getDefaultSource();
-          scriptId = defaultScriptId || 'unknown';
-          if (defaultScriptId) {
-            const scriptInfo = await this.storage.getScript(defaultScriptId);
-            if (scriptInfo) {
-              scriptName = scriptInfo.name;
-            }
-          }
-          
-          const responseData = {
-            url: cachedUrl.url,
-            type: cachedUrl.quality || body.quality,
-            source: body.source,
-            quality: body.quality,
-            lyric: '',
-            tlyric: '',
-            rlyric: '',
-            lxlyric: '',
-            cached: true,
-            cachedAt: new Date(cachedUrl.cachedAt).toISOString(),
-            scriptId,
-            scriptName,
-          };
-          log('[API] 返回缓存数据');
-          log('========== [API] handleGetMusicUrl 结束 ==========\n');
-          return ApiResponseBuilder.toResponse(ApiResponseBuilder.success(responseData, "获取成功（缓存）"));
-        }
-        log(`[API] 缓存未命中, cacheKey: ${cacheKey}`);
-      }
-
       const name = body.name || body.musicInfo?.name || '未知歌曲';
       const singer = body.singer || body.musicInfo?.singer || '未知歌手';
       const originalSource = body.source;
@@ -1210,11 +1172,6 @@ export class APIRoutes {
           await this.storage.updateScriptStats(currentScriptId, true, result.responseTime);
           await this.storage.recordScriptSuccess(currentScriptId);
           await this.storage.updateSourceStats(currentScriptId, originalSource, true);
-
-          if (cacheEnabled && songId) {
-            await this.storage.setMusicUrlCache(body.source, songId, result.url, body.quality);
-            log(`[API] 已缓存 URL, cacheKey: ${cacheKey}`);
-          }
 
           let lyricResult: { lyric: string; tlyric: string; rlyric: string; lxlyric: string } = { lyric: '', tlyric: '', rlyric: '', lxlyric: '' };
           try {
